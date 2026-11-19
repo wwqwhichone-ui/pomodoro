@@ -6,6 +6,8 @@
 > - **Three adaptive layouts + menu bar**: portrait window, Sidecar iPad landscape full-screen, floating mini bar, and live menu bar countdown
 > - **Universal Notion sync**: paste any Notion database URL or ID — auto-detects schema (English & Chinese column names)
 > - **AI-agent ready**: loopback-only `127.0.0.1` Bearer-authenticated JSON API + Python `pomo` CLI
+>
+> **Download pre-built Universal `.app` (Apple Silicon + Intel)**: [Latest Release](https://github.com/wwqwhichone-ui/pomodoro-macos/releases/latest)
 
 一款专为 macOS 与 iPad 随航（Sidecar）打造的原生番茄钟应用。采用纸墨质感（纸色 / 深咖双主题）与压缩粗体大数字排版，内置完整番茄工作法（预估、内外打断、作废、休息建议）、顶部菜单栏实时倒计时、通用 Notion 数据库同步，以及面向 AI 助手（Claude Code / Codex 等）的本机命令行与 HTTP 接口。
 
@@ -30,16 +32,20 @@
 
 ## 快速开始
 
-### 环境要求
+### 方式一：直接下载成品（推荐，无需编译）
 
-- macOS 14.0 (Sonoma) 或更高版本
-- 已安装 Xcode 或 Xcode Command Line Tools（提供 `swiftc`）：
-  ```bash
-  xcode-select --install
-  ```
-- Python 3（macOS 自带或 CLT 提供，仅 `pomo` CLI 需要）
+1. 前往 **[GitHub Releases 最新版本](https://github.com/wwqwhichone-ui/pomodoro-macos/releases/latest)** 下载 `Pomodoro-v*-macos-universal.zip`（同时支持 Apple Silicon 与 Intel Mac，需 macOS 14.0+）。
+2. 双击解压后，将 `Pomodoro.app` 拖入「应用程序（`/Applications`）」。
+3. **首次打开提示（Gatekeeper）**：因为项目采用免费的本地自签名（ad-hoc），未经过付费的 Apple 开发者公证，首次从浏览器下载打开如提示“无法验证开发者”或“已损坏”，在终端运行一次下方命令即可正常打开（或在「系统设置 → 隐私与安全性」底部点击「仍要打开」）：
+   ```bash
+   xattr -cr /Applications/Pomodoro.app
+   ```
 
-### 编译、安装与运行
+### 方式二：从源码编译（开发者 / 使用 `pomo` CLI）
+
+> 本地自己编译不会触发 macOS Gatekeeper 拦截，且可顺手安装 `pomo` 命令行工具。
+
+**环境要求**：macOS 14.0 (Sonoma)+、Xcode Command Line Tools（`xcode-select --install`）、Python 3（仅 `pomo` CLI 需要）。
 
 ```bash
 git clone https://github.com/wwqwhichone-ui/pomodoro-macos.git
@@ -50,6 +56,9 @@ cd pomodoro-macos
 
 # 编译并安装到 /Applications，同时安装 pomo 命令行到 ~/.local/bin/pomo
 ./build.sh --install --install-cli
+
+# 如需自行打包 Apple Silicon + Intel 通用压缩包
+./build.sh --universal --zip
 
 # 运行应用
 open /Applications/Pomodoro.app   # 若未加 --install，则运行 open build/Pomodoro.app

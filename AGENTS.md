@@ -25,11 +25,13 @@ Sources/SettingsControls.swift 设置用控件：CapsuleTabs、SettingRow / Sett
 tools/pomo                      命令行（可软链到 ~/.local/bin/pomo）
 tools/make_icon.swift           生成图标
 docs/API.md                     接口与 Notion 同步说明
+.github/workflows/release.yml   打 v* 标签时自动构建 Universal .zip 并发布 Release
 ```
 
 ## 常用命令
 ```bash
 ./build.sh                                # 仅编译打包到 build/Pomodoro.app
+./build.sh --universal --zip              # 构建 Apple Silicon + Intel 通用版并打 zip
 ./build.sh --install --install-cli        # 同时安装 App 到 /Applications 和 pomo 到 ~/.local/bin
 open build/Pomodoro.app                   # 运行刚构建的应用
 pkill -x Pomodoro                         # 结束运行中的实例（重新构建前）

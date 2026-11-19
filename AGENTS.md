@@ -3,12 +3,12 @@
 > `CLAUDE.md` 是本文件的软链接。开工前先读 `.ai/handoff.md`，收工前更新它。
 
 ## 项目简介
-macOS 原生番茄钟。窗口拖到 Sidecar（iPad 随航）上会自动全屏并切换横屏布局，支持顶部菜单栏实时倒计时；自动探测 Notion 任务数据库结构并同步每日待办 / DDL / 优先级；本机开放 HTTP 接口 + `pomo` 命令行供 AI 调用。视觉参考 Neverless App（米白纸色、压缩粗体数字、细线描边、分段细环）。
+macOS & Windows 桌面番茄钟。macOS 版采用原生 SwiftUI（拖到 Sidecar iPad 随航自动全屏、顶部菜单栏实时倒计时）；`windows/` 为基于 Electron 1:1 复刻视觉与功能的 Windows 版（副屏自动全屏、系统托盘倒计时）；双端均支持自动探测 Notion 任务数据库结构与开放本机 HTTP 接口 + 跨平台 `pomo` 命令行。视觉参考 Neverless App（米白纸色、压缩粗体数字、细线描边、分段细环）。
 
 ## 技术栈
-- Swift 5 语言模式 + SwiftUI（`Window` 场景，最低 macOS 14），`swiftc` 直接编译 `Sources/*.swift`（无 Xcode 工程 / SwiftPM / 第三方依赖），ad-hoc 签名
-- 网络：Notion REST API（URLSession）；本地接口用 Network.framework `NWListener`（仅回环）
-- 命令行：`tools/pomo`（Python 3 标准库）
+- **macOS 原生版（`Sources/`）**：Swift 5 语言模式 + SwiftUI（`Window` 场景，最低 macOS 14），`swiftc` 直接编译（无 Xcode 工程 / SwiftPM / 第三方依赖），ad-hoc 签名，本地接口用 `NWListener`
+- **Windows 版（`windows/`）**：Electron + Node 标准库（无运行时第三方依赖），1:1 复用交互与纸墨视觉，`electron-builder` 打包绿色 `.zip` 与单文件 `portable.exe`
+- **命令行**：`tools/pomo`（Python 3 标准库，跨平台支持 macOS / Windows / Linux）
 
 ## 目录结构
 ```
@@ -22,25 +22,36 @@ Sources/Theme.swift             Theme（纸色 / 深咖）、Typo 字体、Press
 Sources/Components.swift        进度环、阶段切换、按钮、任务列表 / 行（点击展开完整名称）、优先级标签、打断记录等组件
 Sources/Layouts.swift           ContentView（选布局、主题）、横屏 / 竖屏 / 迷你三种布局、工具栏、设置（三个分页）
 Sources/SettingsControls.swift 设置用控件：CapsuleTabs、SettingRow / SettingGroup、InkStepper、InkSwitch、InkField、InkButton、KeyChip（设置里不要再用系统 Stepper / Toggle / 分段控件）
-tools/pomo                      命令行（可软链到 ~/.local/bin/pomo）
-tools/make_icon.swift           生成图标
+tools/pomo                      跨平台命令行（可软链到 ~/.local/bin/pomo）
+tools/make_icon.swift           生成 macOS 图标
 docs/API.md                     接口与 Notion 同步说明
-.github/workflows/release.yml   打 v* 标签时自动构建 Universal .zip 并发布 Release
+windows/src/                    Windows Electron 主进程、Model/Notion/API 与渲染层
+windows/assets/                 Windows icon.ico / icon.png / tray.png
+windows/test/                   Windows 核心单测与实机冒烟脚本
+.github/workflows/release.yml   打 v* 标签时自动构建双平台成品并发布 Release
 ```
 
 ## 常用命令
 ```bash
+# macOS 原生版
 ./build.sh                                # 仅编译打包到 build/Pomodoro.app
 ./build.sh --universal --zip              # 构建 Apple Silicon + Intel 通用版并打 zip
 ./build.sh --install --install-cli        # 同时安装 App 到 /Applications 和 pomo 到 ~/.local/bin
 open build/Pomodoro.app                   # 运行刚构建的应用
 pkill -x Pomodoro                         # 结束运行中的实例（重新构建前）
+
+# Windows 版（在 windows/ 目录）
+cd windows && npm test                    # 运行单测与 API/CLI 集成测试
+cd windows && node test/smoke-win.js      # 用独立临时目录启动桌面版并冒烟测试
+cd windows && npm run dist:win            # 打包 Windows 便携 .zip 与 portable.exe
+
+# 本机接口
 pomo health / pomo status / pomo tasks    # 通过接口操作运行中的 App
-defaults read local.pomodoro.app          # 查看设置、任务、今日统计
+defaults read local.pomodoro.app          # 查看 macOS 设置、任务、今日统计
 ```
-- 无自动化测试；验证 = 构建零警告 + `pomo` 走一遍接口 + 截图看三种布局（竖屏 440×640、横屏 iPad 1074×789、迷你 320×104）
+- 验证：macOS 构建零警告 + `pomo` 接口检查；Windows 侧 `cd windows && npm test && node test/smoke-win.js`（均使用临时 `POMODORO_DATA_DIR` 与高端口，不触碰真实数据）
 - 改动用户数据前先 `defaults export local.pomodoro.app <备份>`，测完 `pkill` 后 `defaults import` 还原
-- 数据：设置与任务在 UserDefaults（`local.pomodoro.app`）；令牌在 `~/Library/Application Support/Pomodoro/{api,notion}.json`（600）
+- 数据：macOS 保存在 UserDefaults（`local.pomodoro.app`）和 `~/Library/Application Support/Pomodoro/{api,notion}.json`；Windows 保存在 `%APPDATA%\Pomodoro\{state,api,notion}.json`
 
 ## 代码规范
 - 尺寸都乘以布局基准（竖屏 / 横屏的 `D` 与 `s`、迷你的 `k`），保证 iPad 全屏等比放大；新增元素同样处理

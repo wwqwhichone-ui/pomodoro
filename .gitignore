@@ -4,3 +4,7 @@
 # 编译产物与系统临时文件
 build/
 .DS_Store
+
+# Windows / Electron 依赖与打包产物
+windows/node_modules/
+windows/dist/

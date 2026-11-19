@@ -1,0 +1,50 @@
+{
+  "name": "pomodoro-windows",
+  "version": "1.1.0",
+  "description": "Minimalist paper-and-ink Pomodoro timer for Windows & macOS with multi-monitor full-screen, tray timer, universal Notion sync, and local AI CLI/API.",
+  "author": "Weiqi Wang",
+  "license": "MIT",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test test/core.test.js",
+    "dist:win": "electron-builder --win --x64"
+  },
+  "build": {
+    "appId": "local.pomodoro.app",
+    "productName": "Pomodoro",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "win": {
+      "icon": "assets/icon.ico",
+      "artifactName": "Pomodoro-v${version}-windows-${arch}.${ext}",
+      "target": [
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "portable": {
+      "artifactName": "Pomodoro-v${version}-windows-${arch}-portable.${ext}"
+    }
+  },
+  "devDependencies": {
+    "electron": "^45.4.1",
+    "electron-builder": "^26.18.0"
+  }
+}

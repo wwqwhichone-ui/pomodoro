@@ -1,4 +1,4 @@
-name: Release macOS Universal
+name: Release macOS & Windows
 
 on:
   push:
@@ -10,31 +10,124 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    runs-on: macos-14
+  build-macos:
+    runs-on: macos-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build Universal App & ZIP
+      - name: Build macOS Universal App & ZIP
         run: |
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             TAG="${GITHUB_REF_NAME}"
           else
             TAG="v$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Info.plist)"
           fi
-          echo "TAG=$TAG" >> "$GITHUB_ENV"
           VERSION="$TAG" ./build.sh --universal --zip
           lipo -info build/Pomodoro.app/Contents/MacOS/Pomodoro
           codesign --verify --deep --strict build/Pomodoro.app
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-assets
+          path: build/Pomodoro-*-macos-universal.zip
+          if-no-files-found: error
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: windows/package-lock.json
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install & Run Unit Tests
+        working-directory: windows
+        run: |
+          npm ci
+          npm test
+
+      - name: Package Windows ZIP & Portable EXE
+        working-directory: windows
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq "tag") {
+            $ver = $env:GITHUB_REF_NAME.TrimStart("v")
+          } else {
+            $ver = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          }
+          npm run dist:win -- "-c.extraMetadata.version=$ver"
+
+      - name: Smoke Test Windows Executable
+        working-directory: windows
+        run: node test/smoke-win.js dist/win-unpacked/Pomodoro.exe
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-assets
+          path: |
+            windows/dist/Pomodoro-*-windows-*.zip
+            windows/dist/Pomodoro-*-windows-*-portable.exe
+          if-no-files-found: error
+
+  publish-release:
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          merge-multiple: true
 
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ZIP="build/Pomodoro-${TAG}-macos-universal.zip"
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "$ZIP" --clobber
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            TAG="${GITHUB_REF_NAME}"
           else
-            gh release create "$TAG" "$ZIP" --title "$TAG" --generate-notes
+            TAG="v$(node -e 'console.log(require("./windows/package.json").version)')"
+          fi
+          ls -lh release-artifacts/
+
+          {
+            echo "## Pomodoro ${TAG} (macOS & Windows)"
+            echo ""
+            echo "Minimalist paper-and-ink Pomodoro timer for **macOS** (Apple Silicon + Intel) and **Windows** (x64)."
+            echo ""
+            echo "### 下载与首次打开 / Downloads & First Launch"
+            echo ""
+            echo "- **macOS**: 下载 \`Pomodoro-${TAG}-macos-universal.zip\`，解压后拖入 \`/Applications\`。因采用免费自签名（ad-hoc），首次打开如拦截可执行一次："
+            echo "  \`\`\`bash"
+            echo "  xattr -cr /Applications/Pomodoro.app"
+            echo "  \`\`\`"
+            echo "- **Windows**: 下载便携压缩包 \`Pomodoro-${TAG}-windows-x64.zip\`（解压运行 \`Pomodoro.exe\`）或单文件绿色版 \`Pomodoro-${TAG}-windows-x64-portable.exe\`（双击即用）。因未购买付费代码签名证书，如遇 Windows SmartScreen 拦截，点击 **更多信息 → 仍要运行** 即可。"
+            echo ""
+            echo "### 校验值 / SHA-256"
+            echo "\`\`\`text"
+            (cd release-artifacts && sha256sum *)
+            echo "\`\`\`"
+          } > release-notes.md
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "${TAG} — macOS & Windows" --notes-file release-notes.md
+            gh release upload "$TAG" release-artifacts/* --clobber
+          else
+            gh release create "$TAG" release-artifacts/* --title "${TAG} — macOS & Windows" --notes-file release-notes.md
           fi

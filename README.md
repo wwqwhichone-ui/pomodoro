@@ -1,70 +1,52 @@
-# 番茄钟 Pomodoro (macOS)
+# 番茄钟 Pomodoro (macOS & Windows)
 
-> **Native macOS Pomodoro timer** built purely in Swift & SwiftUI with zero third-party dependencies — designed to look like printed ink on warm paper, go full-screen on an iPad via Sidecar, live quietly in your menu bar, sync with **any** Notion task database, and let AI coding agents drive your focus flow via a local HTTP API & `pomo` CLI.
+> **Minimalist paper-and-ink Pomodoro timer** for **macOS** (native SwiftUI, zero dependencies) and **Windows** (Electron desktop app with matching design & behavior) — full-screen on Sidecar iPad or secondary displays, live menu bar / system tray countdown, universal Notion task sync, and local AI HTTP API + `pomo` CLI.
 >
-> - **Zero dependencies**: single-command `swiftc` build, macOS 14+, native SwiftUI & AppKit
-> - **Three adaptive layouts + menu bar**: portrait window, Sidecar iPad landscape full-screen, floating mini bar, and live menu bar countdown
+> - **Dual-platform**: pure SwiftUI native app on macOS (`arm64` + `x86_64`), Electron app on Windows (`x64`)
+> - **Three adaptive layouts**: portrait window, multi-monitor / Sidecar landscape full-screen, floating mini bar
 > - **Universal Notion sync**: paste any Notion database URL or ID — auto-detects schema (English & Chinese column names)
-> - **AI-agent ready**: loopback-only `127.0.0.1` Bearer-authenticated JSON API + Python `pomo` CLI
+> - **AI-agent ready**: loopback-only `127.0.0.1` Bearer-authenticated JSON API + cross-platform Python `pomo` CLI
 >
-> **Download pre-built Universal `.app` (Apple Silicon + Intel)**: [Latest Release](https://github.com/wwqwhichone-ui/pomodoro-macos/releases/latest)
+> **Downloads**: [Latest Release (macOS Universal + Windows Portable)](https://github.com/wwqwhichone-ui/pomodoro/releases/latest)
 
-一款专为 macOS 与 iPad 随航（Sidecar）打造的原生番茄钟应用。采用纸墨质感（纸色 / 深咖双主题）与压缩粗体大数字排版，内置完整番茄工作法（预估、内外打断、作废、休息建议）、顶部菜单栏实时倒计时、通用 Notion 数据库同步，以及面向 AI 助手（Claude Code / Codex 等）的本机命令行与 HTTP 接口。
+一款专为 **macOS** 与 **Windows** 打造的纸墨风格番茄钟应用。采用温暖纸色 / 深咖双主题与压缩粗体大数字排版，内置完整番茄工作法（预估、内外打断、作废、休息建议）、顶部菜单栏 / 系统托盘实时倒计时、副屏 / iPad 随航自动全屏联动、通用 Notion 数据库同步，以及面向 AI 助手（Claude Code / Codex 等）的本机命令行与 HTTP 接口。
+
+---
+
+## 快速开始（直接下载）
+
+前往 **[GitHub Releases 最新版本](https://github.com/wwqwhichone-ui/pomodoro/releases/latest)** 下载对应系统安装包：
+
+### macOS（Apple Silicon + Intel 通用版）
+1. 下载 `Pomodoro-v*-macos-universal.zip`（需 macOS 14.0+）。
+2. 解压后将 `Pomodoro.app` 拖入「应用程序（`/Applications`）」。
+3. **首次打开提示**：由于使用免费本地自签名（ad-hoc），未经过付费 Apple 开发者公证，首次双击如提示“无法验证开发者”或“已损坏”，在终端运行一次即可打开（或在「系统设置 → 隐私与安全性」底部点击「仍要打开」）：
+   ```bash
+   xattr -cr /Applications/Pomodoro.app
+   ```
+
+### Windows（x64 绿色便携版 / 单文件版）
+1. 在 Releases 页面任选其一（需 Windows 10 / 11 64 位）：
+   - **`Pomodoro-v*-windows-x64-portable.exe`**：单文件绿色版，无需安装，双击即用。
+   - **`Pomodoro-v*-windows-x64.zip`**：绿色压缩包，解压后运行其中的 `Pomodoro.exe`（启动更快）。
+2. **首次打开提示**：由于开源项目未购买付费代码签名证书，如触发 Windows Defender SmartScreen“Windows 已保护你的电脑”提示，点击 **「更多信息」→「仍要运行」** 即可。
 
 ---
 
 ## 核心特性
 
-- **零第三方依赖，纯原生构建**：仅使用 SwiftUI、AppKit 与 Network.framework，一条 `swiftc` 命令即可编译打包成原生 `.app`，体积轻量、启动秒开。
 - **纸墨双主题 + 自适应三形态布局**：
-  - **竖屏标准窗**（Mac 日常使用）：可随时点开今日待办浮层。
-  - **横屏分栏全屏**（iPad 随航 / 宽屏）：左侧「今日成果 + 当前任务 + 今日待办」，右侧大号分段进度环与控制区；拖到 iPad 随航屏幕自动全屏并防止息屏断连，一键「发送到 iPad / 移回 Mac」（`⌥⌘I` / `⌥⌘M`）。
-  - **迷你悬浮条**（`⌥⌘P`）：置顶显示剩余时间、当前任务与细线进度条。
-- **顶部菜单栏实时倒计时**：可在顶部状态栏实时显示当前阶段图标与剩余时间，点击直接开始/暂停、记录打断、切换迷你窗或唤出主窗口（可在设置中随时关闭）。
+  - **竖屏标准窗**（日常使用）：随时点开今日待办浮层。
+  - **横屏分栏全屏**（副屏 / iPad 随航 / 宽屏）：左侧「今日成果 + 当前任务 + 今日待办」，右侧大号分段进度环与控制区；移至 iPad 随航或外接副屏自动全屏并阻止屏幕休眠，一键「发送到副屏 / 移回主屏」。
+  - **迷你悬浮条**：置顶显示剩余时间、当前任务与细线进度条。
+- **顶部菜单栏 / 系统托盘实时倒计时**：
+  - macOS 在顶部状态栏实时显示图标与剩余时间；Windows 在系统托盘悬停显示倒计时、左键唤出主窗、右键快捷控制（均可在设置中随时开关）。
 - **完整番茄工作法**：
   - 任务预估番茄数（`− / +`）与超出提示，点击待办任务即可展开显示完整长标题与操作栏。
   - `-` 记录**内部打断**、`=` 记录**外部打断**（按物理键码拦截，中文输入法下也可用），误按可点击次数数字直接 `−1` 撤销。
   - 专注中途跳过记为**作废**，自动按完成组数切换短休息 / 长休息与休息建议，支持设置内两步确认「清零今日成果」。
 - **通用 Notion 数据库同步**：支持直接粘贴 Notion 数据库链接或 ID，自动识别中英文列名与字段类型（`status` / `select` / `checkbox` / `date` / `multi_select`），支持自定义 DDL 提前天数与可选完成回写。
-- **AI 友好的本机接口与 `pomo` CLI**：默认监听 `127.0.0.1:47625` 并强制随机 Bearer Token 鉴权，AI 助手可直接查询状态、增删改任务、启动/暂停计时、记录或撤销打断。
-
----
-
-## 快速开始
-
-### 方式一：直接下载成品（推荐，无需编译）
-
-1. 前往 **[GitHub Releases 最新版本](https://github.com/wwqwhichone-ui/pomodoro-macos/releases/latest)** 下载 `Pomodoro-v*-macos-universal.zip`（同时支持 Apple Silicon 与 Intel Mac，需 macOS 14.0+）。
-2. 双击解压后，将 `Pomodoro.app` 拖入「应用程序（`/Applications`）」。
-3. **首次打开提示（Gatekeeper）**：因为项目采用免费的本地自签名（ad-hoc），未经过付费的 Apple 开发者公证，首次从浏览器下载打开如提示“无法验证开发者”或“已损坏”，在终端运行一次下方命令即可正常打开（或在「系统设置 → 隐私与安全性」底部点击「仍要打开」）：
-   ```bash
-   xattr -cr /Applications/Pomodoro.app
-   ```
-
-### 方式二：从源码编译（开发者 / 使用 `pomo` CLI）
-
-> 本地自己编译不会触发 macOS Gatekeeper 拦截，且可顺手安装 `pomo` 命令行工具。
-
-**环境要求**：macOS 14.0 (Sonoma)+、Xcode Command Line Tools（`xcode-select --install`）、Python 3（仅 `pomo` CLI 需要）。
-
-```bash
-git clone https://github.com/wwqwhichone-ui/pomodoro-macos.git
-cd pomodoro-macos
-
-# 仅编译到 build/Pomodoro.app
-./build.sh
-
-# 编译并安装到 /Applications，同时安装 pomo 命令行到 ~/.local/bin/pomo
-./build.sh --install --install-cli
-
-# 如需自行打包 Apple Silicon + Intel 通用压缩包
-./build.sh --universal --zip
-
-# 运行应用
-open /Applications/Pomodoro.app   # 若未加 --install，则运行 open build/Pomodoro.app
-```
-
-> 若提示 `pomo: command not found`，请确认 `~/.local/bin` 已加入你的 `PATH`（例如在 `~/.zshrc` 中添加 `export PATH="$HOME/.local/bin:$PATH"`）。
+- **AI 友好的本机接口与 `pomo` CLI**：双端均监听 `127.0.0.1:47625` 并强制随机 Bearer Token 鉴权，AI 助手可直接查询状态、增删改任务、启动/暂停计时、记录或撤销打断。
 
 ---
 
@@ -86,17 +68,17 @@ open /Applications/Pomodoro.app   # 若未加 --install，则运行 open build/P
 
 ### 快捷键一览
 
-| 快捷键 | 功能 | 说明 |
-|---|---|---|
-| `空格` | 开始 / 暂停 / 继续 | 输入框聚焦时自动放行；中文输入法下同样有效 |
-| `-` | 记录内部打断 | 自己走神或想起别的事，记下后继续专注 |
-| `=` | 记录外部打断 | 被他人或消息打断，推迟处理或记录 |
-| `⌘R` | 重置当前阶段 | 回到当前阶段的完整时长 |
-| `⇧⌘S` | 放弃 / 跳过本段 | 专注中途跳过记为作废；休息时直接结束休息 |
-| `⌥⌘I` | 发送到 iPad 并全屏 | 检测到随航屏幕时一键移至 iPad 全屏 |
-| `⌥⌘M` | 移回 Mac | 退出随航全屏并回到 Mac 原窗口位置 |
-| `⌥⌘P` | 迷你悬浮窗 | 切换置顶悬浮条模式 |
-| `⌃⌘F` | 全屏 / 退出全屏 | 切换主窗口全屏状态 |
+| 功能 | macOS 快捷键 | Windows 快捷键 | 说明 |
+|---|---|---|---|
+| 开始 / 暂停 / 继续 | `空格` | `空格` | 输入框聚焦时自动放行；中文输入法下同样有效 |
+| 记录内部打断 | `-` | `-` | 自己走神或想起别的事，记下后继续专注 |
+| 记录外部打断 | `=` | `=` | 被他人或消息打断，推迟处理或记录 |
+| 重置当前阶段 | `⌘R` | `Ctrl+R` | 回到当前阶段的完整时长 |
+| 放弃 / 跳过本段 | `⇧⌘S` | `Ctrl+Shift+S` | 专注中途跳过记为作废；休息时直接结束休息 |
+| 发送到副屏 / iPad 并全屏 | `⌥⌘I` | `Ctrl+Alt+I` | macOS 识别随航，Windows 识别外接/无线副屏 |
+| 移回主屏 | `⌥⌘M` | `Ctrl+Alt+M` | 退出全屏并回到主屏原窗口位置 |
+| 迷你悬浮窗 | `⌥⌘P` | `Ctrl+Alt+P` | 切换置顶悬浮条模式 |
+| 全屏 / 退出全屏 | `⌃⌘F` | `F11` | 切换主窗口全屏状态 |
 
 ---
 
@@ -130,7 +112,7 @@ App 会在同步前自动读取数据库 schema，按字段类型与常见中英
 
 ## AI Agent 与命令行接入
 
-App 启动后自动在本地开启 HTTP JSON 服务（`http://127.0.0.1:47625`），AI 工具可直接调用 `pomo` 命令行（加 `--json` 可输出结构化 JSON）：
+App 启动后自动在本地开启 HTTP JSON 服务（`http://127.0.0.1:47625`），AI 工具可直接调用跨平台的 `tools/pomo` 命令行（加 `--json` 可输出结构化 JSON）：
 
 ```bash
 pomo health                                           # 存活检查
@@ -148,34 +130,57 @@ pomo sync                                             # 立即同步 Notion
 
 ---
 
+## 从源码编译与测试
+
+### macOS 原生版本（零第三方依赖）
+
+需要 macOS 14.0+、Xcode Command Line Tools（`xcode-select --install`）和 Python 3（仅 `pomo` CLI 需要）：
+
+```bash
+git clone https://github.com/wwqwhichone-ui/pomodoro.git
+cd pomodoro
+
+./build.sh                            # 编译到 build/Pomodoro.app
+./build.sh --install --install-cli    # 安装到 /Applications 并链接 pomo 到 ~/.local/bin
+./build.sh --universal --zip          # 打包 Apple Silicon + Intel 通用 zip
+```
+
+### Windows 版本（Electron）
+
+需要 Node.js 20+（推荐 22）和 Python 3（可选，用于 `tools/pomo` CLI 联调）：
+
+```bash
+cd windows
+npm install          # 安装开发依赖（electron / electron-builder）
+npm test             # 运行单元测试与 API/CLI 集成测试
+npm start            # 本地直接启动桌面端
+npm run dist:win     # 打包 Windows 便携 .zip 与单文件 portable.exe 到 windows/dist/
+```
+
+---
+
 ## 隐私与安全
 
-- **仅回环监听**：HTTP 服务显式绑定 `.loopback`（`127.0.0.1`），局域网和公网无法访问。
+- **仅回环监听**：双端 HTTP 服务均显式绑定 `127.0.0.1`，局域网和公网无法访问。
 - **随机令牌鉴权**：首次启动自动生成 256-bit 随机 Bearer Token（除 `/v1/health` 外所有接口均需校验）。
-- **本地权限隔离**：Notion 令牌与 API 配置分别保存在 `~/Library/Application Support/Pomodoro/notion.json` 与 `api.json`，文件权限固定为 `0600`；任务与计时设置保存在系统 `UserDefaults`（`local.pomodoro.app`），不经过任何第三方服务器。
+- **本地存储隔离**：
+  - **macOS**：令牌保存在 `~/Library/Application Support/Pomodoro/{api,notion}.json`（权限 `0600`），任务与设置保存在系统 `UserDefaults`（`local.pomodoro.app`）。
+  - **Windows**：配置与令牌保存在 `%APPDATA%\Pomodoro\{state,api,notion}.json`。
+  - 全部数据仅存本机，不经过任何第三方服务器。
 
 ---
 
 ## 目录结构
 
 ```text
-Sources/
-  main.swift               App 入口与原生菜单栏命令
-  Model.swift              计时状态机、任务模型、DDL 解析与统计逻辑
-  WindowManager.swift      Sidecar 屏幕识别、自动全屏、迷你窗与物理键码快捷键
-  MenuBarController.swift  顶部状态栏实时倒计时与快捷操作菜单
-  NotionSync.swift         Notion 链接解析、Schema 自动探测、同步与可选回写
-  APIServer.swift          NWListener 本地回环 HTTP API 服务
-  Theme.swift              纸色 / 深咖双主题配色、字体与按钮按压动效
-  Components.swift         分段进度环、任务清单、点击展开完整标题、打断胶囊等组件
-  Layouts.swift            横屏 / 竖屏 / 迷你三形态布局与设置面板
-  SettingsControls.swift   纸墨风自定义设置控件
-tools/
-  pomo                     Python 3 命令行工具（零外部依赖）
-  make_icon.swift          AppIcon.icns 图标生成脚本
-docs/
-  API.md                   本地 HTTP 接口与 Notion 同步详尽文档
-build.sh                   一键编译、打包、可选安装 App 与 CLI
+Sources/                 macOS 原生 SwiftUI 源码（零第三方依赖）
+windows/                 Windows Electron 桌面端（1:1 复刻视觉、副屏、托盘、Notion、API）
+  src/                   主进程、Preload、Model/Notion/API 与渲染层
+  assets/                Windows 图标资源（icon.ico / icon.png / tray.png）
+  test/                  核心单测与端到端冒烟测试
+tools/pomo               跨平台 Python 3 命令行工具（支持 macOS / Windows / Linux）
+docs/API.md              本地 HTTP 接口与 Notion 同步详尽文档
+build.sh                 macOS 一键编译、Universal 打包与安装脚本
 ```
 
 ## License

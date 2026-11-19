@@ -29,7 +29,11 @@ pomo --json tasks           # 任何命令加 --json 输出原始 JSON
 ## HTTP 接口
 
 所有请求（`/v1/health` 除外）都要带 `Authorization: Bearer <token>`。
-令牌和端口在 `~/Library/Application Support/Pomodoro/api.json`（权限 600）。
+令牌和端口读取自配置文件 `api.json`：
+- **macOS**：`~/Library/Application Support/Pomodoro/api.json`（权限 600）
+- **Windows**：`%APPDATA%\Pomodoro\api.json`
+
+`pomo` 命令行会自动按平台定位上述文件（也可用环境变量 `POMODORO_DATA_DIR` / `POMODORO_PORT` 覆盖）。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -69,4 +73,4 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/
 - **筛选范围**：未完成任务中，满足「计划日期 = 今天」或「截止日期 ≤ 今天 + N 天（含已逾期，N 默认 7，可在设置调整 1–30 天）」或「置顶勾选」的任务；若数据库不含这些日期/置顶列，则拉取全部未完成任务。
 - **同步时机**：App 启动时、之后每 30 分钟、点「今日待办」旁的 Notion 按钮，或 `pomo sync`。
 - **回写（默认关闭）**：在设置 →「同步与接口」里打开后，番茄钟里勾选完成会自动把 Notion 中识别到的状态改为完成态（或勾选完成复选框）。
-- **配置文件**：`~/Library/Application Support/Pomodoro/notion.json`（权限 600，含令牌与数据库 ID）。
+- **配置文件**：macOS 为 `~/Library/Application Support/Pomodoro/notion.json`（权限 600），Windows 为 `%APPDATA%\Pomodoro\notion.json`。

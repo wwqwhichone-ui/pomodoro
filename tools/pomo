@@ -27,7 +27,20 @@ import sys
 import urllib.error
 import urllib.request
 
-CONFIG = os.path.expanduser("~/Library/Application Support/Pomodoro/api.json")
+def default_config_path():
+    override = os.environ.get("POMODORO_DATA_DIR")
+    if override:
+        return os.path.join(os.path.expanduser(override), "api.json")
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+        return os.path.join(base, "Pomodoro", "api.json")
+    if sys.platform == "darwin":
+        return os.path.expanduser("~/Library/Application Support/Pomodoro/api.json")
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return os.path.join(base, "Pomodoro", "api.json")
+
+
+CONFIG = default_config_path()
 
 
 def load_config():
@@ -47,7 +60,8 @@ def call(method, path, body=None, auth=True):
                 cfg = json.load(f)
         except FileNotFoundError:
             cfg = {}
-    url = "http://127.0.0.1:%d/v1/%s" % (cfg.get("port", 47625), path)
+    port = int(os.environ.get("POMODORO_PORT") or cfg.get("port", 47625))
+    url = "http://127.0.0.1:%d/v1/%s" % (port, path)
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
     if auth:
@@ -98,6 +112,12 @@ def print_status(s):
 
 
 def main():
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
     ap = argparse.ArgumentParser(prog="pomo", description="番茄钟命令行", add_help=True)
     ap.add_argument("--json", action="store_true", help="输出原始 JSON")
     sub = ap.add_subparsers(dest="cmd")

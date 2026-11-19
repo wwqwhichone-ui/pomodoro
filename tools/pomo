@@ -1,0 +1,215 @@
+#!/usr/bin/env python3
+"""pomo —— 番茄钟的命令行入口（给人用，也给 AI 用）。
+
+需要番茄钟 App 正在运行。端口和令牌自动从
+~/Library/Application Support/Pomodoro/api.json 读取。
+
+用法：
+  pomo health                       检查本机接口是否在线
+  pomo status                       当前阶段、剩余时间、当前任务、今日统计
+  pomo tasks                        今日待办（按 Top3 → 优先级 → DDL 排序，带序号）
+  pomo add "写周报" [-e 2] [-p P1] [-d 2026-11-25|11-25|明天] [--top3] [--note ...] [--select]
+  pomo done <序号|id前缀>            标记完成
+  pomo select <序号|id前缀>          设为当前任务
+  pomo edit <序号|id前缀> [-t 标题] [-e N] [-p P0-P3|none] [-d 日期|none] [--top3|--no-top3]
+  pomo rm <序号|id前缀>              删除
+  pomo start | pause | toggle | reset | skip
+  pomo phase focus|short|long
+  pomo interrupt internal|external [--undo]   记一次打断；--undo 撤销最近一次误记
+  pomo reset-today                  清零今日成果（番茄数、专注时长、打断、作废）
+  pomo sync                         立即同步 Notion
+  加 --json 输出原始 JSON（AI 解析用）
+"""
+import argparse
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+CONFIG = os.path.expanduser("~/Library/Application Support/Pomodoro/api.json")
+
+
+def load_config():
+    try:
+        with open(CONFIG, encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        sys.exit("找不到 %s：请先打开一次番茄钟 App。" % CONFIG)
+
+
+def call(method, path, body=None, auth=True):
+    if auth:
+        cfg = load_config()
+    else:
+        try:
+            with open(CONFIG, encoding="utf-8") as f:
+                cfg = json.load(f)
+        except FileNotFoundError:
+            cfg = {}
+    url = "http://127.0.0.1:%d/v1/%s" % (cfg.get("port", 47625), path)
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method)
+    if auth:
+        req.add_header("Authorization", "Bearer " + cfg["token"])
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        try:
+            msg = json.loads(e.read()).get("error", str(e))
+        except Exception:
+            msg = str(e)
+        sys.exit("错误（HTTP %d）：%s" % (e.code, msg))
+    except urllib.error.URLError:
+        sys.exit("连不上番茄钟：App 没有运行，或接口未开启。")
+
+
+def fmt_task(i, t):
+    mark = "✓" if t["finished"] else ("▶" if t.get("current") else " ")
+    bits = []
+    if t.get("priority"):
+        bits.append(t["priority"])
+    if t.get("ddl") and not t["finished"]:
+        bits.append(t["ddl"])
+    if t.get("tag"):
+        bits.append(t["tag"])
+    bits.append("%d/%d🍅" % (t["done"], t["estimate"]))
+    if t.get("source") == "notion":
+        bits.append("Notion")
+    star = "★ " if t.get("top3") else ""
+    return "%s %2d. %s%s   [%s]  id:%s" % (mark, i, star, t["title"], " · ".join(bits), t["id"][:8])
+
+
+def print_status(s):
+    state = "进行中" if s["running"] else ("已暂停" if s["paused"] else "未开始")
+    line = "%s · %s · 剩余 %s" % (s["phaseTitle"], state, s["remaining"])
+    if s.get("endsAt"):
+        line += "（预计 %s 结束）" % s["endsAt"][11:16]
+    print(line)
+    if s.get("currentTask"):
+        print("当前任务：" + fmt_task(0, s["currentTask"]).split(". ", 1)[1])
+    d = s["today"]
+    print("今日：%d 个番茄 · 专注 %d 分钟 · 打断 %d · 作废 %d · 本组 %d/%d" % (
+        d["completed"], d["focusMinutes"], d["internalInterruptions"] + d["externalInterruptions"],
+        d["voided"], s["streak"], s["longBreakEvery"]))
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="pomo", description="番茄钟命令行", add_help=True)
+    ap.add_argument("--json", action="store_true", help="输出原始 JSON")
+    sub = ap.add_subparsers(dest="cmd")
+    sub.add_parser("health")
+    sub.add_parser("status")
+    sub.add_parser("tasks")
+    a = sub.add_parser("add")
+    a.add_argument("title")
+    a.add_argument("-e", "--estimate", type=int)
+    a.add_argument("-p", "--priority")
+    a.add_argument("-d", "--due")
+    a.add_argument("--top3", action="store_true")
+    a.add_argument("--note")
+    a.add_argument("--select", action="store_true", help="添加后设为当前任务")
+    for name in ("done", "select", "rm"):
+        sub.add_parser(name).add_argument("task")
+    e = sub.add_parser("edit")
+    e.add_argument("task")
+    e.add_argument("-t", "--title")
+    e.add_argument("-e", "--estimate", type=int)
+    e.add_argument("-p", "--priority")
+    e.add_argument("-d", "--due")
+    e.add_argument("--note")
+    g = e.add_mutually_exclusive_group()
+    g.add_argument("--top3", dest="top3", action="store_true", default=None)
+    g.add_argument("--no-top3", dest="top3", action="store_false")
+    for name in ("start", "pause", "toggle", "reset", "skip", "sync"):
+        sub.add_parser(name)
+    sub.add_parser("phase").add_argument("phase", choices=["focus", "short", "long"])
+    it = sub.add_parser("interrupt")
+    it.add_argument("kind", choices=["internal", "external"])
+    it.add_argument("--undo", action="store_true", help="撤销最近一次误记")
+    sub.add_parser("reset-today")
+    args = ap.parse_args()
+
+    if args.cmd == "health":
+        r = call("GET", "health", auth=False)
+        if args.json:
+            return print(json.dumps(r, ensure_ascii=False, indent=2))
+        return print("OK (%s)" % r.get("app", "Pomodoro"))
+
+    if args.cmd in (None, "status"):
+        r = call("GET", "status")
+        return print(json.dumps(r, ensure_ascii=False, indent=2)) if args.json else print_status(r)
+
+    if args.cmd == "tasks":
+        r = call("GET", "tasks")
+        if args.json:
+            return print(json.dumps(r, ensure_ascii=False, indent=2))
+        if not r["tasks"]:
+            return print("（今日待办为空）")
+        for i, t in enumerate(r["tasks"], 1):
+            print(fmt_task(i, t))
+        return
+
+    if args.cmd == "add":
+        body = {"title": args.title, "top3": args.top3, "select": args.select}
+        if args.estimate:
+            body["estimate"] = args.estimate
+        if args.priority:
+            body["priority"] = args.priority
+        if args.due:
+            body["due"] = args.due
+        if args.note:
+            body["note"] = args.note
+        r = call("POST", "tasks", body)
+    elif args.cmd == "done":
+        r = call("POST", "tasks/%s/complete" % args.task)
+    elif args.cmd == "select":
+        r = call("POST", "tasks/%s/select" % args.task)
+    elif args.cmd == "rm":
+        r = call("DELETE", "tasks/%s" % args.task)
+    elif args.cmd == "edit":
+        body = {}
+        if args.title:
+            body["title"] = args.title
+        if args.estimate:
+            body["estimate"] = args.estimate
+        if args.priority:
+            body["priority"] = None if args.priority == "none" else args.priority
+        if args.due:
+            body["due"] = None if args.due == "none" else args.due
+        if args.note is not None:
+            body["note"] = args.note
+        if args.top3 is not None:
+            body["top3"] = args.top3
+        r = call("PATCH", "tasks/%s" % args.task, body)
+    elif args.cmd in ("start", "pause", "toggle", "reset", "skip"):
+        r = call("POST", "timer/" + args.cmd)
+    elif args.cmd == "phase":
+        r = call("POST", "timer/phase", {"phase": args.phase})
+    elif args.cmd == "interrupt":
+        r = call("POST", "interruptions", {"kind": args.kind, "undo": args.undo})
+    elif args.cmd == "reset-today":
+        r = call("POST", "stats/reset")
+    elif args.cmd == "sync":
+        r = call("POST", "notion/sync")
+        if not args.json:
+            return print("已同步 %d 条 Notion 任务。" % r.get("count", 0))
+    else:
+        ap.print_help()
+        return
+
+    if args.json:
+        print(json.dumps(r, ensure_ascii=False, indent=2))
+    elif "phaseTitle" in r:
+        print_status(r)
+    elif "title" in r:
+        print("OK  " + fmt_task(0, r).split(". ", 1)[1])
+    else:
+        print("OK")
+
+
+if __name__ == "__main__":
+    main()

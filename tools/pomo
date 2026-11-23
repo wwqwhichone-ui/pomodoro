@@ -17,7 +17,8 @@
   pomo phase focus|short|long
   pomo interrupt internal|external [--undo]   记一次打断；--undo 撤销最近一次误记
   pomo reset-today                  清零今日成果（番茄数、专注时长、打断、作废）
-  pomo sync                         立即同步 Notion
+  pomo sync                         立即同步 Notion 任务
+  pomo log-today                    立即把今日专注统计同步到 Notion 日志库
   加 --json 输出原始 JSON（AI 解析用）
 """
 import argparse
@@ -144,7 +145,7 @@ def main():
     g = e.add_mutually_exclusive_group()
     g.add_argument("--top3", dest="top3", action="store_true", default=None)
     g.add_argument("--no-top3", dest="top3", action="store_false")
-    for name in ("start", "pause", "toggle", "reset", "skip", "sync"):
+    for name in ("start", "pause", "toggle", "reset", "skip", "sync", "log-today"):
         sub.add_parser(name)
     sub.add_parser("phase").add_argument("phase", choices=["focus", "short", "long"])
     it = sub.add_parser("interrupt")
@@ -217,6 +218,11 @@ def main():
         r = call("POST", "notion/sync")
         if not args.json:
             return print("已同步 %d 条 Notion 任务。" % r.get("count", 0))
+    elif args.cmd == "log-today":
+        r = call("POST", "notion/log-today")
+        if not args.json:
+            return print("已同步今日记录到 Notion（%s · %d 个番茄 · %d 分钟）。" % (
+                r.get("day", ""), r.get("completed", 0), r.get("focusMinutes", 0)))
     else:
         ap.print_help()
         return

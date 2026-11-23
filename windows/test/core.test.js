@@ -11,13 +11,16 @@ const {
   Phase,
   DDL,
   TimerModel,
+  parseDay,
   parseQuickAdd,
   localDayString,
 } = require("../src/model");
 const {
   NotionSchema,
+  NotionLogSchema,
   NotionSync,
   extractID,
+  parseCategories,
   filterBody,
   parseNotionPage,
 } = require("../src/notion");
@@ -273,6 +276,23 @@ test("NotionSync falls back from data_sources 404 to databases and writes back c
   }
 });
 
+test("task deadlines reject malformed dates and validate the inferred calendar year", () => {
+  const today = new Date(2027, 10, 23);
+  for (const input of ["2027--11-25", "-11/25", "11.25.", "2027-02-29", "2026-02-30"]) {
+    assert.equal(parseDay(input, today), null, input);
+  }
+  for (const [input, expected] of [
+    ["Today", "2027-11-23"], ["明天", "2027-11-24"], ["11/23", "2027-11-23"],
+    ["11.22", "2028-11-22"], ["2-29", "2028-02-29"], ["2028-02-29", "2028-02-29"],
+  ]) {
+    assert.equal(localDayString(parseDay(input, today)), expected, input);
+  }
+  assert.equal(parseDay("2-29", new Date(2028, 2, 1)), null);
+  const task = parseQuickAdd("写周报 @2027--11-25");
+  assert.equal(task.title, "写周报 @2027--11-25");
+  assert.equal(task.due, null);
+});
+
 test("TimerModel quick-add, settingsChanged, interruptions, voided skip, and cross-day startup", () => {
   const dir = makeTmpDir();
   try {
@@ -442,11 +462,233 @@ test("APIServer full endpoints + tools/pomo CLI integration", async () => {
     const resetRes = await fetch(`${base}/stats/reset`, { method: "POST", headers: authHeaders });
     assert.equal(resetRes.status, 200);
 
+    // Unconfigured Pomodoro Log -> 409
+    const uncfgLog = await fetch(`${base}/notion/log-today`, { method: "POST", headers: authHeaders });
+    assert.equal(uncfgLog.status, 409);
+
     const delRes = await fetch(`${base}/tasks/1`, { method: "DELETE", headers: authHeaders });
     assert.equal(delRes.status, 200);
   } finally {
     await server.stop();
     model.dispose();
+    rmDir(dir);
+  }
+});
+
+test("parseCategories & Category/Event exclusion in schema, filterBody, and parseNotionPage", () => {
+  assert.deepEqual(parseCategories("Event, 会议 , ，Activity\n"), ["Event", "会议", "Activity"]);
+  assert.deepEqual(parseCategories(""), []);
+
+  // Select property: Category
+  const dbSelect = {
+    title: [{ plain_text: "Master Tasks" }],
+    properties: {
+      Name: { type: "title", title: {} },
+      Category: { type: "select", select: { options: [{ name: "Task" }, { name: "Event" }] } },
+    },
+  };
+  const sSel = NotionSchema.detect(dbSelect);
+  assert.equal(sSel.categoryProp, "Category");
+  assert.equal(sSel.categoryType, "select");
+  const fbSel = filterBody(7, sSel, ["Event"]);
+  assert.deepEqual(fbSel.filter, { property: "Category", select: { does_not_equal: "Event" } });
+
+  const eventPage = {
+    id: "ev-1",
+    properties: { Name: { title: [{ plain_text: "Club Event" }] }, Category: { select: { name: "event" } } },
+  };
+  const taskPage = {
+    id: "tk-1",
+    properties: { Name: { title: [{ plain_text: "Real Task" }] }, Category: { select: { name: "Task" } } },
+  };
+  assert.equal(parseNotionPage(eventPage, sSel, ["Event"]), null);
+  assert.equal(parseNotionPage(taskPage, sSel, ["Event"]).title, "Real Task");
+
+  // Multi-select property: 标签
+  const dbMulti = {
+    title: [{ plain_text: "板" }],
+    properties: {
+      Name: { type: "title", title: {} },
+      分类: { type: "multi_select", multi_select: { options: [{ name: "Event" }, { name: "Work" }] } },
+    },
+  };
+  const sMulti = NotionSchema.detect(dbMulti);
+  assert.equal(sMulti.categoryProp, "分类");
+  assert.equal(sMulti.categoryType, "multi_select");
+  const fbMulti = filterBody(7, sMulti, ["Event"]);
+  assert.deepEqual(fbMulti.filter, { property: "分类", multi_select: { does_not_contain: "Event" } });
+  const multiEventPage = {
+    id: "ev-2",
+    properties: { Name: { title: [{ plain_text: "Demo Day" }] }, 分类: { multi_select: [{ name: "Event" }] } },
+  };
+  assert.equal(parseNotionPage(multiEventPage, sMulti, ["Event"]), null);
+});
+
+test("NotionLogSchema.detect (EN & ZH), cross-day pendingDailyLogs rollover, and upsert + log-today endpoint", async () => {
+  const sEn = NotionLogSchema.detect({
+    title: [{ plain_text: "Pomodoro Log" }],
+    properties: {
+      Day: { type: "title", title: {} },
+      Date: { type: "date", date: {} },
+      Pomodoros: { type: "number", number: {} },
+      "Focus Minutes": { type: "number", number: {} },
+      "Internal Interruptions": { type: "number", number: {} },
+      "External Interruptions": { type: "number", number: {} },
+      Voided: { type: "number", number: {} },
+      Tasks: { type: "rich_text", rich_text: {} },
+    },
+  });
+  assert.equal(sEn.titleProp, "Day");
+  assert.equal(sEn.dateProp, "Date");
+  assert.equal(sEn.completedProp, "Pomodoros");
+  assert.equal(sEn.focusMinutesProp, "Focus Minutes");
+  assert.equal(sEn.internalProp, "Internal Interruptions");
+  assert.equal(sEn.externalProp, "External Interruptions");
+  assert.equal(sEn.voidedProp, "Voided");
+  assert.equal(sEn.tasksProp, "Tasks");
+
+  const sZh = NotionLogSchema.detect({
+    title: [{ plain_text: "每日番茄" }],
+    properties: {
+      标题: { type: "title", title: {} },
+      日期: { type: "date", date: {} },
+      番茄数: { type: "number", number: {} },
+      专注分钟: { type: "number", number: {} },
+      内打断: { type: "number", number: {} },
+      外打断: { type: "number", number: {} },
+      作废: { type: "number", number: {} },
+      任务: { type: "rich_text", rich_text: {} },
+    },
+  });
+  assert.equal(sZh.titleProp, "标题");
+  assert.equal(sZh.dateProp, "日期");
+  assert.equal(sZh.completedProp, "番茄数");
+  assert.equal(sZh.tasksProp, "任务");
+
+  const dir = makeTmpDir();
+  try {
+    // Yesterday active stats should be queued on startup; zero-activity should not
+    const stateFile = path.join(dir, "state.json");
+    fs.writeFileSync(
+      stateFile,
+      JSON.stringify({
+        stats: {
+          day: "2026-11-18",
+          completed: 3,
+          voided: 1,
+          internalBreaks: 2,
+          externalBreaks: 0,
+          focusSeconds: 4500,
+          taskPomodoros: { "Write paper": 2, "Review PR": 1 },
+        },
+        tasks: [{ id: "T1", title: "Write paper", estimate: 3, done: 2, finished: false }],
+      })
+    );
+
+    const model = new TimerModel({ dataDir: dir });
+    assert.equal(model.pendingDailyLogs.length, 1);
+    assert.equal(model.pendingDailyLogs[0].day, "2026-11-18");
+    assert.equal(model.pendingDailyLogs[0].completed, 3);
+    assert.equal(model.pendingDailyLogs[0].focusMinutes, 75);
+    assert.match(model.pendingDailyLogs[0].taskSummary, /Write paper \(2🍅\)/);
+
+    // Verify refreshDay rollover archives today's active stats too
+    model.stats.completed = 1;
+    model.stats.focusSeconds = 1500;
+    model.stats.taskPomodoros = { "Write paper": 1 };
+    model.stats.day = "2026-11-19";
+    model.refreshDay();
+    assert.equal(model.pendingDailyLogs.length, 2);
+    assert.equal(model.pendingDailyLogs[1].day, "2026-11-19");
+
+    // Verify focus completion increments taskPomodoros & emits focusCompleted
+    let emitted = null;
+    model.on("focusCompleted", (entry) => { emitted = entry; });
+    model.updateSettings({ focusMinutes: 1 });
+    model._advance(true);
+    assert.ok(emitted);
+    assert.equal(emitted.completed, 1);
+    assert.equal(model.stats.taskPomodoros["Write paper"], 1);
+    assert.match(emitted.taskSummary, /Write paper/);
+
+    // Mock Notion fetch for upsert: first day returns empty query -> POST /pages; second returns existing -> PATCH
+    const reqLog = [];
+    const createdPages = new Set();
+    const mockFetch = async (url, opts) => {
+      const body = opts.body ? JSON.parse(opts.body) : null;
+      reqLog.push({ method: opts.method, url, body });
+      if (opts.method === "GET" && url.includes("/data_sources/")) {
+        return {
+          status: 200,
+          json: async () => ({
+            title: [{ plain_text: "Pomodoro Log" }],
+            properties: {
+              Day: { type: "title", title: {} },
+              Date: { type: "date", date: {} },
+              Pomodoros: { type: "number", number: {} },
+              "Focus Minutes": { type: "number", number: {} },
+              "Internal Interruptions": { type: "number", number: {} },
+              "External Interruptions": { type: "number", number: {} },
+              Voided: { type: "number", number: {} },
+              Tasks: { type: "rich_text", rich_text: {} },
+            },
+          }),
+        };
+      }
+      if (opts.method === "POST" && url.endsWith("/query")) {
+        const day = body?.filter?.date?.equals;
+        if (day === "2026-11-19" || createdPages.has(day)) {
+          return { status: 200, json: async () => ({ results: [{ id: `row-${day}` }] }) };
+        }
+        return { status: 200, json: async () => ({ results: [] }) };
+      }
+      if (opts.method === "POST" && url.endsWith("/pages")) {
+        const day = body?.properties?.Date?.date?.start;
+        createdPages.add(day);
+        return { status: 200, json: async () => ({ id: `row-${day}` }) };
+      }
+      if (opts.method === "PATCH" && url.includes("/pages/")) {
+        return { status: 200, json: async () => ({ id: "patched" }) };
+      }
+      throw new Error(`Unexpected ${opts.method} ${url}`);
+    };
+
+    const sync = new NotionSync({ dataDir: dir, model, fetchFn: mockFetch });
+    sync.update({
+      token: "test-token",
+      logDataSourceID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+      logDatabaseID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    });
+
+    await sync.syncDailyLogNow(false);
+    assert.equal(model.pendingDailyLogs.length, 0);
+    assert.ok(reqLog.some((r) => r.method === "POST" && r.url.endsWith("/pages") && r.body.properties.Date.date.start === "2026-11-18"));
+    assert.ok(reqLog.some((r) => r.method === "PATCH" && r.url.endsWith("/pages/row-2026-11-19")));
+
+    // HTTP POST /v1/notion/log-today + CLI pomo log-today
+    const server = new APIServer({ dataDir: dir, model, notion: sync });
+    const port = await server.start(0);
+    try {
+      const authHeaders = { Authorization: `Bearer ${server.config.token}` };
+      const res = await fetch(`http://127.0.0.1:${port}/v1/notion/log-today`, { method: "POST", headers: authHeaders });
+      assert.equal(res.status, 200);
+      const json = await res.json();
+      assert.equal(json.ok, true);
+      assert.equal(json.completed, 1);
+      assert.ok(createdPages.has(localDayString()));
+
+      const py = getPythonCmd();
+      if (py) {
+        const pomoScript = path.resolve(__dirname, "..", "..", "tools", "pomo");
+        const env = { ...process.env, POMODORO_DATA_DIR: dir, POMODORO_PORT: String(port) };
+        const { stdout } = await execFileAsync(py, [pomoScript, "log-today"], { env, encoding: "utf8" });
+        assert.match(stdout, new RegExp(localDayString()));
+      }
+    } finally {
+      await server.stop();
+    }
+    model.dispose();
+  } finally {
     rmDir(dir);
   }
 });

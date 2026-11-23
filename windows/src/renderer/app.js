@@ -7,6 +7,8 @@
   let state = null;
   let activePopover = null; // null | "settings" | "tasks"
   let settingsTab = 0; // 0: 计时, 1: 同步与接口, 2: 方法
+  let syncSubTab = 0; // 0: 任务同步, 1: 每日记录, 2: AI 接口
+  let editingLogToken = false;
   let confirmResetToday = false;
   let copiedToken = false;
   let expandCurrentTitle = false;
@@ -15,6 +17,8 @@
 
   let notionTokenDraft = "";
   let notionTargetDraft = "";
+  let notionExcludedDraft = "";
+  let notionLogTargetDraft = "";
   let lastLayoutKind = null;
   let lastGrainKey = "";
   let taskDraft = "";
@@ -742,6 +746,8 @@
     } else if (activePopover === "settings" && settingsTab === 1) {
       const statusSlot = popoverLayer.querySelector('[data-slot="notion-status-area"]');
       if (statusSlot) statusSlot.innerHTML = renderNotionStatusHTML();
+      const logStatusSlot = popoverLayer.querySelector('[data-slot="notion-log-status-area"]');
+      if (logStatusSlot) logStatusSlot.innerHTML = renderLogStatusHTML();
     }
   }
 
@@ -771,6 +777,41 @@
       title = `已连接 · ${dbLabel}`;
       color = "var(--positive)";
       detail = "等待首次同步";
+    }
+    return `
+      <div class="status-dot-wrap">
+        <div class="status-dot-row">
+          <span class="status-dot" style="background:${color};"></span>
+          <span>${esc(title)}</span>
+        </div>
+        <div class="status-dot-detail">${esc(detail)}</div>
+      </div>`;
+  }
+
+  function renderLogStatusHTML() {
+    const n = state.notion;
+    const dbLabel = n.logDatabaseTitle || "Notion 每日记录";
+    let title, color, detail;
+    if (!n.logConfigured) {
+      title = "未配置";
+      color = "var(--faint)";
+      detail = "填写每日记录数据库（如 Pomodoro Log）链接或 ID";
+    } else if (n.logSyncing) {
+      title = "同步中…";
+      color = "var(--warning)";
+      detail = `正在写入 ${dbLabel}`;
+    } else if (n.lastLogError) {
+      title = "同步失败";
+      color = "var(--accent-focus)";
+      detail = n.lastLogError;
+    } else if (n.lastLogSyncHM) {
+      title = `已连接 · ${dbLabel}`;
+      color = "var(--positive)";
+      detail = `上次同步 ${n.lastLogSyncHM}`;
+    } else {
+      title = `已连接 · ${dbLabel}`;
+      color = "var(--positive)";
+      detail = "等待同步";
     }
     return `
       <div class="status-dot-wrap">
@@ -897,62 +938,125 @@
           </div>
         </div>`;
     } else if (settingsTab === 1) {
-      const dirty = notionTokenDraft.trim() !== "" || notionTargetDraft.trim() !== n.targetInput;
+      const dirty =
+        notionTokenDraft.trim() !== "" ||
+        notionTargetDraft.trim() !== n.targetInput ||
+        notionExcludedDraft.trim() !== n.excludedCategoriesText;
       const saveDisabled = (!notionTokenDraft.trim() && !n.hasToken) || !notionTargetDraft.trim() || n.syncing;
       const btnLabel = dirty ? "保存并同步" : "立即同步";
-      tabBody = `
-        <div class="setting-group">
-          <div class="setting-group-label">Notion</div>
-          <div data-slot="notion-status-area">${renderNotionStatusHTML()}</div>
-          <div style="font-size:11px;color:var(--gray);line-height:1.45;margin-bottom:4px;">
-            范围：今天计划、${n.lookaheadDays} 天内到期、已逾期、置顶的未完成任务；启动时和每 30 分钟同步。
-          </div>
-          <div class="ink-field">
-            <div class="ink-field-label">Integration 令牌${n.hasToken ? "（已保存，留空表示保持不变）" : ""}</div>
-            <input class="ink-field-input" data-slot="notion-token" type="password" placeholder="ntn_… 或 secret_…" value="${esc(notionTokenDraft)}" />
-          </div>
-          <div class="ink-field">
-            <div class="ink-field-label">数据库链接或 ID</div>
-            <input class="ink-field-input mono" data-slot="notion-target" type="text" placeholder="粘贴 Notion 数据库链接或 ID" value="${esc(notionTargetDraft)}" />
-          </div>
-          <div class="setting-row">
-            <div><div class="setting-row-title">DDL 提前天数</div><div class="setting-row-detail">拉取未来几天内到期的任务</div></div>
-            ${stepper("lookaheadDays", n.lookaheadDays, "天", 1, 30)}
-          </div>
-          <div class="setting-row no-divider">
-            <div><div class="setting-row-title">完成时回写 Notion</div><div class="setting-row-detail">在番茄钟里勾选完成时同步更新 Notion 状态</div></div>
-            ${sw("writeBack", n.writeBack, "toggle-notion-writeback")}
-          </div>
-          <div style="margin-top:8px;">
-            <button class="ink-btn filled pressable" data-act="notion-save-sync" ${saveDisabled ? "disabled" : ""}>
-              ${svgIcon("sync", 12)}
-              <span>${btnLabel}</span>
-            </button>
-          </div>
-        </div>
-        <div class="hairline" style="margin-top:16px;"></div>
-        <div class="setting-group">
-          <div class="setting-group-label">AI 接口</div>
-          <div class="status-dot-wrap">
-            <div class="status-dot-row">
-              <span class="status-dot" style="background:${api.running ? "var(--positive)" : "var(--accent-focus)"};"></span>
-              <span>${api.running ? "已开启" : "未启动"}</span>
-            </div>
-            <div class="status-dot-detail">${api.running ? `只在本机 127.0.0.1:${api.port} 监听，需令牌访问` : esc(api.lastError || "")}</div>
-          </div>
-          <div style="display:flex;gap:6px;flex-wrap:wrap;padding:4px 0;">
-            <span class="key-chip mono">pomo status</span>
-            <span class="key-chip mono">pomo tasks</span>
-            <span class="key-chip mono">pomo add</span>
-          </div>
-          <div style="font-size:11px;color:var(--gray);padding:4px 0;">AI 用命令行 pomo 即可调用，说明见 docs/API.md</div>
-          <div style="margin-top:6px;">
-            <button class="ink-btn outline pressable" data-act="copy-api-token">
-              ${svgIcon(copiedToken ? "check" : "copy", 12)}
-              <span>${copiedToken ? "已复制" : "复制接口令牌"}</span>
-            </button>
-          </div>
+
+      const logDirty = notionTokenDraft.trim() !== "" || notionLogTargetDraft.trim() !== n.logTargetInput;
+      const logDisabled =
+        n.logSyncing ||
+        (!notionTokenDraft.trim() && !n.hasToken && Boolean(notionLogTargetDraft.trim())) ||
+        (!logDirty && !n.logConfigured);
+      const logBtnLabel = logDirty ? "保存记录库" : "立即同步今日";
+
+      const subTabsHTML = `
+        <div class="hairline" style="margin-top:10px;"></div>
+        <div class="capsule-tabs" style="gap:4px;margin-left:-10px;margin-top:10px;">
+          ${[
+            [0, "任务同步"],
+            [1, "每日记录"],
+            [2, "AI 接口"],
+          ]
+            .map(
+              ([v, label]) =>
+                `<button class="capsule-tab ${syncSubTab === v ? "active" : ""}" data-act="sync-sub-tab" data-sub="${v}" style="font-size:11.5px;padding:4px 10px;">${label}</button>`
+            )
+            .join("")}
         </div>`;
+
+      if (syncSubTab === 0) {
+        tabBody = `${subTabsHTML}
+          <div class="setting-group">
+            <div class="setting-group-label">Notion 任务同步</div>
+            <div data-slot="notion-status-area">${renderNotionStatusHTML()}</div>
+            <div style="font-size:11px;color:var(--gray);line-height:1.45;margin-bottom:4px;">
+              范围：今天计划、${n.lookaheadDays} 天内到期、已逾期、置顶的未完成任务；启动时和每 30 分钟同步。
+            </div>
+            <div class="ink-field">
+              <div class="ink-field-label">Integration 令牌${n.hasToken ? "（已保存，留空表示保持不变）" : ""}</div>
+              <input class="ink-field-input" data-slot="notion-token" type="password" placeholder="ntn_… 或 secret_…" value="${esc(notionTokenDraft)}" />
+            </div>
+            <div class="ink-field">
+              <div class="ink-field-label">任务数据库链接或 ID</div>
+              <input class="ink-field-input mono" data-slot="notion-target" type="text" placeholder="粘贴任务数据库链接或 ID" value="${esc(notionTargetDraft)}" />
+            </div>
+            <div class="ink-field">
+              <div class="ink-field-label">排除分类（逗号分隔）</div>
+              <input class="ink-field-input" data-slot="notion-excluded" type="text" placeholder="如 Event, 活动, 会议" value="${esc(notionExcludedDraft)}" />
+            </div>
+            <div class="setting-row">
+              <div><div class="setting-row-title">DDL 提前天数</div><div class="setting-row-detail">拉取未来几天内到期的任务</div></div>
+              ${stepper("lookaheadDays", n.lookaheadDays, "天", 1, 30)}
+            </div>
+            <div class="setting-row no-divider">
+              <div><div class="setting-row-title">完成时回写 Notion</div><div class="setting-row-detail">在番茄钟里勾选完成时同步更新 Notion 状态</div></div>
+              ${sw("writeBack", n.writeBack, "toggle-notion-writeback")}
+            </div>
+            <div style="margin-top:8px;">
+              <button class="ink-btn filled pressable" data-act="notion-save-sync" ${saveDisabled ? "disabled" : ""}>
+                ${svgIcon("sync", 12)}
+                <span>${btnLabel}</span>
+              </button>
+            </div>
+          </div>`;
+      } else if (syncSubTab === 1) {
+        const logTokenField =
+          !n.hasToken || editingLogToken
+            ? `<div class="ink-field">
+                 <div class="ink-field-label">Integration 令牌${n.hasToken ? "（留空保持不变）" : ""}</div>
+                 <input class="ink-field-input" data-slot="notion-token" type="password" placeholder="ntn_… 或 secret_…" value="${esc(notionTokenDraft)}" />
+               </div>`
+            : `<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;">
+                 <span style="font-size:11px;color:var(--gray);">已共用 Notion Integration 令牌</span>
+                 <button data-act="edit-log-token" style="font-size:11px;font-weight:500;color:var(--ink);">更换令牌</button>
+               </div>`;
+        tabBody = `${subTabsHTML}
+          <div class="setting-group">
+            <div class="setting-group-label">每日记录同步</div>
+            <div data-slot="notion-log-status-area">${renderLogStatusHTML()}</div>
+            <div style="font-size:11px;color:var(--gray);line-height:1.45;margin-bottom:4px;">
+              跨天或次日打开自动归档昨天统计，完成番茄时实时更新当天记录；按日期去重。
+            </div>
+            ${logTokenField}
+            <div class="ink-field">
+              <div class="ink-field-label">每日记录数据库链接或 ID</div>
+              <input class="ink-field-input mono" data-slot="notion-log-target" type="text" placeholder="粘贴 Pomodoro Log 链接或 ID（留空关闭）" value="${esc(notionLogTargetDraft)}" />
+            </div>
+            <div style="margin-top:8px;">
+              <button class="ink-btn filled pressable" data-act="notion-log-save-sync" ${logDisabled ? "disabled" : ""}>
+                ${svgIcon("sync", 12)}
+                <span>${logBtnLabel}</span>
+              </button>
+            </div>
+          </div>`;
+      } else {
+        tabBody = `${subTabsHTML}
+          <div class="setting-group">
+            <div class="setting-group-label">AI 接口</div>
+            <div class="status-dot-wrap">
+              <div class="status-dot-row">
+                <span class="status-dot" style="background:${api.running ? "var(--positive)" : "var(--accent-focus)"};"></span>
+                <span>${api.running ? "已开启" : "未启动"}</span>
+              </div>
+              <div class="status-dot-detail">${api.running ? `只在本机 127.0.0.1:${api.port} 监听，需令牌访问` : esc(api.lastError || "")}</div>
+            </div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;padding:4px 0;">
+              <span class="key-chip mono">pomo status</span>
+              <span class="key-chip mono">pomo tasks</span>
+              <span class="key-chip mono">pomo log-today</span>
+            </div>
+            <div style="font-size:11px;color:var(--gray);padding:4px 0;">AI 用命令行 pomo 即可调用，说明见 docs/API.md</div>
+            <div style="margin-top:6px;">
+              <button class="ink-btn outline pressable" data-act="copy-api-token">
+                ${svgIcon(copiedToken ? "check" : "copy", 12)}
+                <span>${copiedToken ? "已复制" : "复制接口令牌"}</span>
+              </button>
+            </div>
+          </div>`;
+      }
     } else {
       const steps = [
         ["列出今日待办", "预估每件要几个番茄"],
@@ -1126,8 +1230,11 @@
       activePopover = activePopover === "settings" ? null : "settings";
       confirmResetToday = false;
       copiedToken = false;
+      editingLogToken = false;
       notionTokenDraft = "";
       notionTargetDraft = state?.notion?.targetInput || "";
+      notionExcludedDraft = state?.notion?.excludedCategoriesText ?? "Event";
+      notionLogTargetDraft = state?.notion?.logTargetInput || "";
       renderPopover();
       renderDynamicSlots();
       return;
@@ -1136,6 +1243,7 @@
       activePopover = null;
       confirmResetToday = false;
       copiedToken = false;
+      editingLogToken = false;
       renderPopover();
       renderDynamicSlots();
       return;
@@ -1145,7 +1253,20 @@
       confirmResetToday = false;
       if (settingsTab === 1) {
         notionTargetDraft = state?.notion?.targetInput || notionTargetDraft;
+        notionExcludedDraft = state?.notion?.excludedCategoriesText ?? notionExcludedDraft;
+        notionLogTargetDraft = state?.notion?.logTargetInput || notionLogTargetDraft;
       }
+      renderPopover();
+      return;
+    }
+    if (act === "sync-sub-tab") {
+      syncSubTab = Number(el.dataset.sub);
+      copiedToken = false;
+      renderPopover();
+      return;
+    }
+    if (act === "edit-log-token") {
+      editingLogToken = true;
       renderPopover();
       return;
     }
@@ -1208,17 +1329,31 @@
       const payload = {
         token: tokenToSave || undefined,
         target: targetToSave,
+        excludedText: notionExcludedDraft,
       };
-      // If token input left blank and already configured, keep existing token in main
       if (!tokenToSave && state.notion.hasToken) {
         delete payload.token;
-        // update target + sync without wiping token
-        await window.pomo.saveAndSyncNotion({ tokenKeep: true, target: targetToSave });
+        await window.pomo.saveAndSyncNotion({ tokenKeep: true, target: targetToSave, excludedText: notionExcludedDraft });
       } else {
         await window.pomo.saveAndSyncNotion(payload);
       }
       notionTokenDraft = "";
       notionTargetDraft = state?.notion?.targetInput || targetToSave;
+      notionExcludedDraft = state?.notion?.excludedCategoriesText ?? notionExcludedDraft;
+      renderPopover();
+      return;
+    }
+    if (act === "notion-log-save-sync") {
+      const tokenToSave = notionTokenDraft.trim();
+      const logTargetToSave = notionLogTargetDraft.trim();
+      if (!tokenToSave && state.notion.hasToken) {
+        await window.pomo.saveAndSyncLog({ tokenKeep: true, logTarget: logTargetToSave });
+      } else {
+        await window.pomo.saveAndSyncLog({ token: tokenToSave, logTarget: logTargetToSave });
+      }
+      notionTokenDraft = "";
+      notionLogTargetDraft = state?.notion?.logTargetInput ?? logTargetToSave;
+      editingLogToken = false;
       renderPopover();
       return;
     }
@@ -1250,18 +1385,40 @@
     } else if (slot === "notion-target") {
       notionTargetDraft = e.target.value;
       updateNotionSaveBtnState();
+    } else if (slot === "notion-excluded") {
+      notionExcludedDraft = e.target.value;
+      updateNotionSaveBtnState();
+    } else if (slot === "notion-log-target") {
+      notionLogTargetDraft = e.target.value;
+      updateNotionSaveBtnState();
     }
   });
 
   function updateNotionSaveBtnState() {
-    const btn = popoverLayer.querySelector('[data-act="notion-save-sync"]');
-    if (!btn || !state) return;
+    if (!state) return;
     const n = state.notion;
-    const dirty = notionTokenDraft.trim() !== "" || notionTargetDraft.trim() !== n.targetInput;
-    const disabled = (!notionTokenDraft.trim() && !n.hasToken) || !notionTargetDraft.trim() || n.syncing;
-    btn.disabled = disabled;
-    const span = btn.querySelector("span:last-child");
-    if (span) span.textContent = dirty ? "保存并同步" : "立即同步";
+    const btn = popoverLayer.querySelector('[data-act="notion-save-sync"]');
+    if (btn) {
+      const dirty =
+        notionTokenDraft.trim() !== "" ||
+        notionTargetDraft.trim() !== n.targetInput ||
+        notionExcludedDraft.trim() !== n.excludedCategoriesText;
+      const disabled = (!notionTokenDraft.trim() && !n.hasToken) || !notionTargetDraft.trim() || n.syncing;
+      btn.disabled = disabled;
+      const span = btn.querySelector("span:last-child");
+      if (span) span.textContent = dirty ? "保存并同步" : "立即同步";
+    }
+    const logBtn = popoverLayer.querySelector('[data-act="notion-log-save-sync"]');
+    if (logBtn) {
+      const logDirty = notionTokenDraft.trim() !== "" || notionLogTargetDraft.trim() !== n.logTargetInput;
+      const logDisabled =
+        n.logSyncing ||
+        (!notionTokenDraft.trim() && !n.hasToken && Boolean(notionLogTargetDraft.trim())) ||
+        (!logDirty && !n.logConfigured);
+      logBtn.disabled = logDisabled;
+      const span = logBtn.querySelector("span:last-child");
+      if (span) span.textContent = logDirty ? "保存记录库" : "立即同步今日";
+    }
   }
 
   document.addEventListener(

@@ -1,16 +1,37 @@
 const { EventEmitter } = require("events");
 const path = require("path");
 const { getDataDir, readJSON, writeJSON } = require("./store");
-const { localDayString, parseStoredDate } = require("./model");
+const { localDayString, parseStoredDate, hasStatsActivity } = require("./model");
+
+function parseCategories(raw) {
+  const seen = new Set();
+  const result = [];
+  for (const part of String(raw || "").split(/[,，]/)) {
+    const clean = part.trim();
+    if (!clean) continue;
+    const lower = clean.toLowerCase();
+    if (!seen.has(lower)) {
+      seen.add(lower);
+      result.push(clean);
+    }
+  }
+  return result;
+}
 
 function normalizeConfig(raw = {}) {
   const days = Number(raw.lookaheadDays);
+  const excluded = Array.isArray(raw.excludedCategories)
+    ? raw.excludedCategories.map((s) => String(s).trim()).filter(Boolean)
+    : ["Event"];
   return {
     token: typeof raw.token === "string" ? raw.token : "",
     dataSourceID: typeof raw.dataSourceID === "string" ? raw.dataSourceID : "",
     databaseID: typeof raw.databaseID === "string" ? raw.databaseID : "",
     writeBack: Boolean(raw.writeBack),
     lookaheadDays: Number.isFinite(days) ? Math.min(90, Math.max(1, Math.round(days))) : 7,
+    excludedCategories: excluded,
+    logDataSourceID: typeof raw.logDataSourceID === "string" ? raw.logDataSourceID : "",
+    logDatabaseID: typeof raw.logDatabaseID === "string" ? raw.logDatabaseID : "",
   };
 }
 
@@ -20,7 +41,23 @@ function configHelpers(cfg) {
   const trimmedDatabaseID = cfg.databaseID.trim();
   const targetInput = trimmedDataSourceID || trimmedDatabaseID;
   const isConfigured = Boolean(trimmedToken && (trimmedDataSourceID || trimmedDatabaseID));
-  return { trimmedToken, trimmedDataSourceID, trimmedDatabaseID, targetInput, isConfigured };
+
+  const trimmedLogDataSourceID = (cfg.logDataSourceID || "").trim();
+  const trimmedLogDatabaseID = (cfg.logDatabaseID || "").trim();
+  const logTargetInput = trimmedLogDataSourceID || trimmedLogDatabaseID;
+  const isLogConfigured = Boolean(trimmedToken && (trimmedLogDataSourceID || trimmedLogDatabaseID));
+
+  return {
+    trimmedToken,
+    trimmedDataSourceID,
+    trimmedDatabaseID,
+    targetInput,
+    isConfigured,
+    trimmedLogDataSourceID,
+    trimmedLogDatabaseID,
+    logTargetInput,
+    isLogConfigured,
+  };
 }
 
 function extractID(raw) {
@@ -51,10 +88,24 @@ function findMatching(entries, types, keywords, used, avoidInSubstring = []) {
   return null;
 }
 
+function sortedEntries(json) {
+  const props = json?.properties;
+  if (!props || typeof props !== "object") return [];
+  return Object.entries(props)
+    .map(([name, prop]) => ({ name, prop: prop || {}, type: prop?.type || "" }))
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "accent" }));
+}
+
+function extractTitle(json) {
+  if (!Array.isArray(json?.title)) return null;
+  const t = json.title.map((x) => x?.plain_text || "").join("").trim();
+  return t || null;
+}
+
 const NotionSchema = {
   detect(json) {
     const schema = {
-      databaseTitle: null,
+      databaseTitle: extractTitle(json),
       titleProp: null,
       statusProp: null,
       statusType: null,
@@ -64,20 +115,14 @@ const NotionSchema = {
       scheduledProp: null,
       priorityProp: null,
       top3Prop: null,
+      categoryProp: null,
+      categoryType: null,
+      categoryOptions: [],
       tagProps: [],
     };
 
-    if (Array.isArray(json?.title)) {
-      const t = json.title.map((x) => x?.plain_text || "").join("").trim();
-      if (t) schema.databaseTitle = t;
-    }
-
-    const props = json?.properties;
-    if (!props || typeof props !== "object") return schema;
-
-    const entries = Object.entries(props)
-      .map(([name, prop]) => ({ name, prop: prop || {}, type: prop?.type || "" }))
-      .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "accent" }));
+    const entries = sortedEntries(json);
+    if (entries.length === 0) return schema;
     const used = new Set();
 
     // 1. 标题列
@@ -190,6 +235,16 @@ const NotionSchema = {
       used.add(top3Entry.name);
     }
 
+    // 6.5. 分类列（用于排除过滤，不插入 used 以便标签显示继续兼容）
+    const categoryKeywords = ["category", "type", "kind", "分类", "类别", "类型"];
+    const catEntry = findMatching(entries, ["select", "multi_select"], categoryKeywords, used);
+    if (catEntry) {
+      schema.categoryProp = catEntry.name;
+      schema.categoryType = catEntry.type;
+      const opts = catEntry.prop[catEntry.type]?.options;
+      schema.categoryOptions = Array.isArray(opts) ? opts.map((o) => o?.name).filter(Boolean) : [];
+    }
+
     // 7. 标签列
     const tagKeywords = ["course", "category", "project", "area", "tag", "tags", "课程", "分类", "项目", "标签"];
     for (const kw of tagKeywords) {
@@ -208,7 +263,68 @@ const NotionSchema = {
   },
 };
 
-function filterBody(lookahead, schema) {
+const NotionLogSchema = {
+  detect(json) {
+    const schema = {
+      databaseTitle: extractTitle(json),
+      titleProp: null,
+      dateProp: null,
+      completedProp: null,
+      focusMinutesProp: null,
+      internalProp: null,
+      externalProp: null,
+      voidedProp: null,
+      tasksProp: null,
+    };
+    const entries = sortedEntries(json);
+    if (entries.length === 0) return schema;
+    const used = new Set();
+
+    const t = entries.find((e) => e.type === "title");
+    if (t) {
+      schema.titleProp = t.name;
+      used.add(t.name);
+    }
+    const d = findMatching(entries, ["date"], ["date", "day", "日期", "时间"], used);
+    if (d) {
+      schema.dateProp = d.name;
+      used.add(d.name);
+    }
+    const p = findMatching(entries, ["number"], ["pomodoros", "pomodoro", "completed", "count", "番茄数", "番茄", "完成数", "完成"], used);
+    if (p) {
+      schema.completedProp = p.name;
+      used.add(p.name);
+    }
+    const m = findMatching(entries, ["number"], ["focus minutes", "minutes", "focus", "duration", "专注分钟", "专注时长", "分钟", "时长"], used);
+    if (m) {
+      schema.focusMinutesProp = m.name;
+      used.add(m.name);
+    }
+    const i = findMatching(entries, ["number"], ["internal interruptions", "internal breaks", "internal", "内部打断", "内打断"], used);
+    if (i) {
+      schema.internalProp = i.name;
+      used.add(i.name);
+    }
+    const e = findMatching(entries, ["number"], ["external interruptions", "external breaks", "external", "外部打断", "外打断"], used);
+    if (e) {
+      schema.externalProp = e.name;
+      used.add(e.name);
+    }
+    const v = findMatching(entries, ["number"], ["voided", "void", "abandoned", "作废", "放弃"], used);
+    if (v) {
+      schema.voidedProp = v.name;
+      used.add(v.name);
+    }
+    const s = findMatching(entries, ["rich_text"], ["tasks", "task summary", "summary", "notes", "任务", "任务明细", "摘要", "备注"], used);
+    if (s) {
+      schema.tasksProp = s.name;
+      used.add(s.name);
+    }
+    return schema;
+  },
+};
+
+function filterBody(lookahead, schema, excludedCategories = []) {
   const now = new Date();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const until = new Date(today.getFullYear(), today.getMonth(), today.getDate() + lookahead);
@@ -227,6 +343,19 @@ function filterBody(lookahead, schema) {
     } else if (schema.openStatuses.length > 0) {
       const ors = schema.openStatuses.map((s) => ({ property: schema.statusProp, status: { equals: s } }));
       andFilters.push(ors.length === 1 ? ors[0] : { or: ors });
+    }
+  }
+
+  if (schema.categoryProp && Array.isArray(excludedCategories) && excludedCategories.length > 0) {
+    for (const raw of excludedCategories) {
+      const clean = String(raw || "").trim();
+      if (!clean) continue;
+      const matched = (schema.categoryOptions || []).find((o) => o.toLowerCase() === clean.toLowerCase()) || clean;
+      if (schema.categoryType === "multi_select") {
+        andFilters.push({ property: schema.categoryProp, multi_select: { does_not_contain: matched } });
+      } else {
+        andFilters.push({ property: schema.categoryProp, select: { does_not_equal: matched } });
+      }
     }
   }
 
@@ -275,10 +404,25 @@ function parseNotionDate(s) {
   return d ? { date: d, hasTime } : null;
 }
 
-function parseNotionPage(page, schema) {
+function parseNotionPage(page, schema, excludedCategories = []) {
   const id = page?.id;
   const props = page?.properties;
   if (!id || !props || typeof props !== "object") return null;
+
+  if (schema.categoryProp && Array.isArray(excludedCategories) && excludedCategories.length > 0) {
+    const excludedSet = new Set(excludedCategories.map((x) => String(x || "").trim().toLowerCase()).filter(Boolean));
+    const p = props[schema.categoryProp];
+    const values = [];
+    if (p?.select?.name) values.push(p.select.name);
+    if (Array.isArray(p?.multi_select)) {
+      for (const item of p.multi_select) {
+        if (item?.name) values.push(item.name);
+      }
+    }
+    if (values.some((v) => excludedSet.has(String(v).trim().toLowerCase()))) {
+      return null;
+    }
+  }
 
   let titleObj = schema.titleProp ? props[schema.titleProp] : null;
   if (!titleObj) {
@@ -349,12 +493,20 @@ class NotionSync extends EventEmitter {
     this.model = model;
     this.fetchFn = fetchFn || globalThis.fetch;
     this.config = normalizeConfig(readJSON(this.filePath, {}));
+
     this.syncing = false;
     this.lastSync = null;
     this.lastCount = 0;
     this.lastError = null;
     this.databaseTitle = null;
     this.cachedSchema = null;
+
+    this.logSyncing = false;
+    this.lastLogSync = null;
+    this.lastLogError = null;
+    this.logDatabaseTitle = null;
+    this.cachedLogSchema = null;
+
     this.timer = null;
   }
 
@@ -363,8 +515,17 @@ class NotionSync extends EventEmitter {
     return `${h.trimmedToken}|${h.trimmedDataSourceID}|${h.trimmedDatabaseID}`;
   }
 
+  _logCacheKey(c = this.config) {
+    const h = configHelpers(c);
+    return `${h.trimmedToken}|${h.trimmedLogDataSourceID}|${h.trimmedLogDatabaseID}`;
+  }
+
   _emitChange() {
     this.emit("change", this.getStatus());
+  }
+
+  _fmtHM(d) {
+    return d ? `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}` : null;
   }
 
   getStatus() {
@@ -375,11 +536,19 @@ class NotionSync extends EventEmitter {
       hasToken: Boolean(h.trimmedToken),
       lookaheadDays: this.config.lookaheadDays,
       writeBack: this.config.writeBack,
+      excludedCategories: [...this.config.excludedCategories],
+      excludedCategoriesText: this.config.excludedCategories.join(", "),
       syncing: this.syncing,
-      lastSyncHM: this.lastSync ? `${String(this.lastSync.getHours()).padStart(2, "0")}:${String(this.lastSync.getMinutes()).padStart(2, "0")}` : null,
+      lastSyncHM: this._fmtHM(this.lastSync),
       lastCount: this.lastCount,
       lastError: this.lastError,
       databaseTitle: this.databaseTitle,
+      logConfigured: h.isLogConfigured,
+      logTargetInput: h.logTargetInput,
+      logSyncing: this.logSyncing,
+      lastLogSyncHM: this._fmtHM(this.lastLogSync),
+      lastLogError: this.lastLogError,
+      logDatabaseTitle: this.logDatabaseTitle,
     };
   }
 
@@ -387,17 +556,23 @@ class NotionSync extends EventEmitter {
     if (model) this.model = model;
     if (this.model && !this._boundFinish) {
       this._boundFinish = (task) => this.taskFinished(task);
+      this._boundDailyReady = () => this.flushPendingLogs(false);
+      this._boundFocusDone = (entry) => this.syncFocusCompleted(entry);
       this.model.on("taskFinished", this._boundFinish);
+      this.model.on("dailyLogReady", this._boundDailyReady);
+      this.model.on("focusCompleted", this._boundFocusDone);
     }
     if (configHelpers(this.config).isConfigured) {
       this.sync().catch(() => {});
     }
+    this.flushPendingLogs(true);
     if (!this.timer) {
       this.timer = setInterval(() => {
         this.model?.refreshDay();
         if (configHelpers(this.config).isConfigured) {
           this.sync().catch(() => {});
         }
+        this.flushPendingLogs(true);
       }, 30 * 60 * 1000);
       if (typeof this.timer.unref === "function") this.timer.unref();
     }
@@ -410,12 +585,17 @@ class NotionSync extends EventEmitter {
     }
     if (this.model && this._boundFinish) {
       this.model.off("taskFinished", this._boundFinish);
+      this.model.off("dailyLogReady", this._boundDailyReady);
+      this.model.off("focusCompleted", this._boundFocusDone);
       this._boundFinish = null;
+      this._boundDailyReady = null;
+      this._boundFocusDone = null;
     }
   }
 
   update(patchOrFn) {
     const oldKey = this._cacheKey();
+    const oldLogKey = this._logCacheKey();
     const copy = { ...this.config };
     if (typeof patchOrFn === "function") patchOrFn(copy);
     else Object.assign(copy, patchOrFn);
@@ -424,6 +604,10 @@ class NotionSync extends EventEmitter {
     if (this._cacheKey() !== oldKey) {
       this.cachedSchema = null;
       this.databaseTitle = null;
+    }
+    if (this._logCacheKey() !== oldLogKey) {
+      this.cachedLogSchema = null;
+      this.logDatabaseTitle = null;
     }
     this._emitChange();
   }
@@ -461,30 +645,55 @@ class NotionSync extends EventEmitter {
     }
   }
 
+  async _resolveSchemaFor(dsID, dbID, token, detector) {
+    const targetDB = dbID || dsID;
+    if (dsID) {
+      try {
+        const json = await this._request("GET", `data_sources/${dsID}`, "2025-09-03", token);
+        return { schema: detector(json), useDataSource: true };
+      } catch (err) {
+        if ((err.code === 400 || err.code === 404) && targetDB) {
+          const json = await this._request("GET", `databases/${targetDB}`, "2022-06-28", token);
+          return { schema: detector(json), useDataSource: false };
+        }
+        throw err;
+      }
+    }
+    const json = await this._request("GET", `databases/${targetDB}`, "2022-06-28", token);
+    return { schema: detector(json), useDataSource: false };
+  }
+
   async resolveSchema(cfg = this.config) {
     const key = this._cacheKey(cfg);
     if (this.cachedSchema && this.cachedSchema.key === key) {
       return { schema: this.cachedSchema.schema, useDataSource: this.cachedSchema.useDataSource };
     }
     const h = configHelpers(cfg);
-    const dsID = h.trimmedDataSourceID;
-    const dbID = h.trimmedDatabaseID || dsID;
+    return this._resolveSchemaFor(h.trimmedDataSourceID, h.trimmedDatabaseID, h.trimmedToken, NotionSchema.detect);
+  }
 
-    if (dsID) {
+  async resolveLogSchema(cfg = this.config) {
+    const key = this._logCacheKey(cfg);
+    if (this.cachedLogSchema && this.cachedLogSchema.key === key) {
+      return { schema: this.cachedLogSchema.schema, useDataSource: this.cachedLogSchema.useDataSource };
+    }
+    const h = configHelpers(cfg);
+    return this._resolveSchemaFor(h.trimmedLogDataSourceID, h.trimmedLogDatabaseID, h.trimmedToken, NotionLogSchema.detect);
+  }
+
+  async _postQuery(dsID, dbID, useDataSource, token, body) {
+    const targetDB = dbID || dsID;
+    if (useDataSource && dsID) {
       try {
-        const json = await this._request("GET", `data_sources/${dsID}`, "2025-09-03", h.trimmedToken);
-        return { schema: NotionSchema.detect(json), useDataSource: true };
+        return await this._request("POST", `data_sources/${dsID}/query`, "2025-09-03", token, body);
       } catch (err) {
-        if ((err.code === 400 || err.code === 404) && dbID) {
-          const json = await this._request("GET", `databases/${dbID}`, "2022-06-28", h.trimmedToken);
-          return { schema: NotionSchema.detect(json), useDataSource: false };
+        if ((err.code === 400 || err.code === 404) && targetDB) {
+          return await this._request("POST", `databases/${targetDB}/query`, "2022-06-28", token, body);
         }
         throw err;
       }
-    } else {
-      const json = await this._request("GET", `databases/${dbID}`, "2022-06-28", h.trimmedToken);
-      return { schema: NotionSchema.detect(json), useDataSource: false };
     }
+    return this._request("POST", `databases/${targetDB}/query`, "2022-06-28", token, body);
   }
 
   async fetchAll(cfg, schema, useDataSource) {
@@ -493,7 +702,7 @@ class NotionSync extends EventEmitter {
     do {
       const { results, next } = await this.queryPage(cfg, schema, useDataSource, cursor);
       for (const page of results) {
-        const parsed = parseNotionPage(page, schema);
+        const parsed = parseNotionPage(page, schema, cfg.excludedCategories);
         if (parsed) all.push(parsed);
       }
       cursor = next;
@@ -503,29 +712,128 @@ class NotionSync extends EventEmitter {
 
   async queryPage(cfg, schema, useDataSource, cursor) {
     const h = configHelpers(cfg);
-    const body = filterBody(cfg.lookaheadDays, schema);
+    const body = filterBody(cfg.lookaheadDays, schema, cfg.excludedCategories);
     if (cursor) body.start_cursor = cursor;
-    const dsID = h.trimmedDataSourceID;
-    const dbID = h.trimmedDatabaseID || dsID;
+    const json = await this._postQuery(h.trimmedDataSourceID, h.trimmedDatabaseID, useDataSource, h.trimmedToken, body);
+    const results = Array.isArray(json.results) ? json.results : [];
+    const next = json.has_more === true ? json.next_cursor || null : null;
+    return { results, next };
+  }
 
-    let json;
-    if (useDataSource && dsID) {
+  async syncDailyLogNow(includeToday = true) {
+    const cfg = { ...this.config };
+    const h = configHelpers(cfg);
+    if (!h.isLogConfigured) {
+      throw new Error("还没有填写 Notion 令牌和每日记录数据库 ID");
+    }
+    if (this.logSyncing) {
+      throw new Error("正在同步中");
+    }
+    this.logSyncing = true;
+    this._emitChange();
+    const pending = [...(this.model?.pendingDailyLogs || [])];
+    const todayEntry = includeToday ? this.model?.currentDailyLog() : null;
+    try {
+      let resolved = await this.resolveLogSchema(cfg);
+      for (const item of pending) {
+        resolved = await this.upsertDailyLog(item, cfg, resolved);
+        this.model?.removePendingDailyLog(item.day);
+      }
+      let finalEntry = todayEntry || pending[pending.length - 1] || this.model?.currentDailyLog();
+      if (todayEntry) {
+        resolved = await this.upsertDailyLog(todayEntry, cfg, resolved);
+        finalEntry = todayEntry;
+      }
+      if (this._logCacheKey() === this._logCacheKey(cfg)) {
+        this.cachedLogSchema = { key: this._logCacheKey(cfg), ...resolved };
+        this.logDatabaseTitle = resolved.schema.databaseTitle;
+      }
+      this.lastLogSync = new Date();
+      this.lastLogError = null;
+      this.logSyncing = false;
+      this._emitChange();
+      return finalEntry;
+    } catch (err) {
+      this.lastLogError = err?.message || String(err);
+      this.logSyncing = false;
+      this._emitChange();
+      throw err;
+    }
+  }
+
+  flushPendingLogs(syncTodayIfActive = false) {
+    if (!configHelpers(this.config).isLogConfigured) return;
+    const hasPending = (this.model?.pendingDailyLogs?.length || 0) > 0;
+    const todayActive = syncTodayIfActive && hasStatsActivity(this.model?.stats);
+    if (!hasPending && !todayActive) return;
+    this.syncDailyLogNow(todayActive).catch(() => {});
+  }
+
+  syncFocusCompleted(entry) {
+    if (!configHelpers(this.config).isLogConfigured) return;
+    if (this.logSyncing) {
+      this.model?.enqueueDailyLog(entry);
+      return;
+    }
+    this.syncDailyLogNow(true).catch(() => {});
+  }
+
+  async upsertDailyLog(entry, cfg, resolved) {
+    const h = configHelpers(cfg);
+    const s = resolved.schema;
+    const dsID = h.trimmedLogDataSourceID;
+    const dbID = h.trimmedLogDatabaseID || dsID;
+
+    const queryBody = { page_size: 1 };
+    if (s.dateProp) {
+      queryBody.filter = { property: s.dateProp, date: { equals: entry.day } };
+    } else if (s.titleProp) {
+      queryBody.filter = { property: s.titleProp, title: { equals: entry.day } };
+    } else {
+      throw new SyncHttpError(400, "每日记录数据库缺少日期或标题列");
+    }
+
+    const queryResult = await this._postQuery(dsID, dbID, resolved.useDataSource, h.trimmedToken, queryBody);
+    const existingID = queryResult?.results?.[0]?.id || null;
+
+    const props = {};
+    if (s.titleProp) props[s.titleProp] = { title: [{ text: { content: entry.day } }] };
+    if (s.dateProp) props[s.dateProp] = { date: { start: entry.day } };
+    if (s.completedProp) props[s.completedProp] = { number: entry.completed };
+    if (s.focusMinutesProp) props[s.focusMinutesProp] = { number: entry.focusMinutes };
+    if (s.internalProp) props[s.internalProp] = { number: entry.internalBreaks };
+    if (s.externalProp) props[s.externalProp] = { number: entry.externalBreaks };
+    if (s.voidedProp) props[s.voidedProp] = { number: entry.voided };
+    if (s.tasksProp) {
+      const trimmed = String(entry.taskSummary || "").slice(0, 1900);
+      props[s.tasksProp] = { rich_text: trimmed ? [{ text: { content: trimmed } }] : [] };
+    }
+
+    if (existingID) {
+      await this._request("PATCH", `pages/${existingID}`, "2022-06-28", h.trimmedToken, { properties: props });
+    } else if (resolved.useDataSource && dsID) {
       try {
-        json = await this._request("POST", `data_sources/${dsID}/query`, "2025-09-03", h.trimmedToken, body);
+        await this._request("POST", "pages", "2025-09-03", h.trimmedToken, {
+          parent: { type: "data_source_id", data_source_id: dsID },
+          properties: props,
+        });
       } catch (err) {
         if ((err.code === 400 || err.code === 404) && dbID) {
-          json = await this._request("POST", `databases/${dbID}/query`, "2022-06-28", h.trimmedToken, body);
+          await this._request("POST", "pages", "2022-06-28", h.trimmedToken, {
+            parent: { database_id: dbID },
+            properties: props,
+          });
         } else {
           throw err;
         }
       }
     } else {
-      json = await this._request("POST", `databases/${dbID}/query`, "2022-06-28", h.trimmedToken, body);
+      await this._request("POST", "pages", "2022-06-28", h.trimmedToken, {
+        parent: { database_id: dbID },
+        properties: props,
+      });
     }
-
-    const results = Array.isArray(json.results) ? json.results : [];
-    const next = json.has_more === true ? json.next_cursor || null : null;
-    return { results, next };
+    return resolved;
   }
 
   async _request(method, endpoint, version, token, body = null) {
@@ -589,8 +897,10 @@ class NotionSync extends EventEmitter {
 
 module.exports = {
   NotionSchema,
+  NotionLogSchema,
   NotionSync,
   extractID,
+  parseCategories,
   filterBody,
   parseNotionPage,
   parsePriority,

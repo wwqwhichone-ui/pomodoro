@@ -90,8 +90,9 @@
 2. 在你的 Notion 任务数据库页面右上角 `···` → **Connections**（或在 Integration 的 **Access** 设置中），将该数据库授权给这个 Integration。
 3. 打开番茄钟右上角 **设置 → 同步与接口**：
    - 粘贴 **Integration 令牌**
-   - 直接粘贴该 Notion 数据库的**网页链接**或 **Database / Data Source ID**
-   - 按需设置 **DDL 提前天数**（1–30 天，默认 7 天）和 **完成时回写 Notion**（默认关闭）
+   - 直接粘贴任务数据库的**网页链接**或 **Database / Data Source ID**
+   - 按需设置 **DDL 提前天数**（1–30 天，默认 7 天）、**排除分类**（逗号分隔，默认 `Event`，让活动仅留在 Notion 日历视图而不进今日待办）和 **完成时回写 Notion**（默认关闭）
+   - 如需记录每日番茄成果，在 **每日记录同步** 栏粘贴另一个记录数据库（如 `Pomodoro Log`）链接或 ID，点击 **保存记录库** 即可启用：每个番茄完成时实时更新当天记录，跨天重启/休眠唤醒也会自动补传昨日数据
    - 点击 **保存并同步**
 
 ### 字段自动适配规则
@@ -108,6 +109,11 @@ App 会在同步前自动读取数据库 schema，按字段类型与常见中英
 | 置顶 / Top 3 | `Top 3` / `Focus` / `Pinned` / `Important` / `重点` / `置顶`（`checkbox`） |
 | 标签 / 课程 / 项目 | `Course` / `Category` / `Project` / `Area` / `Tag` / `课程` / `分类` / `项目` / `标签` |
 
+如配置了 **每日番茄记录同步**（推荐单独建一个 `Pomodoro Log` 数据库），支持自动识别以下中英文列名：
+- `Day` / `日期标题`（Title）、`Date` / `日期`（Date，用作按天幂等匹配主键）
+- `Pomodoros` / `番茄数`、`Focus Minutes` / `专注分钟`、`Internal Interruptions` / `内打断`、`External Interruptions` / `外打断`、`Voided` / `作废`（Number）
+- `Tasks` / `任务`（Rich text，记录当日完成番茄的任务与计数）
+
 ---
 
 ## AI Agent 与命令行接入
@@ -123,7 +129,8 @@ pomo start                                            # 开始专注
 pomo interrupt internal                               # 记录一次内部打断
 pomo interrupt internal --undo                        # 撤销本番茄内误记的一次打断
 pomo done 1                                           # 按序号或 8 位 id 前缀标记完成
-pomo sync                                             # 立即同步 Notion
+pomo sync                                             # 立即同步 Notion 任务
+pomo log-today                                        # 立即同步今日番茄记录到 Notion
 ```
 
 完整的 HTTP 接口路径、请求体与响应格式请见 [docs/API.md](docs/API.md)。

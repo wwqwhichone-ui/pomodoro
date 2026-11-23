@@ -17,7 +17,8 @@ pomo phase focus|short|long
 pomo interrupt internal|external [--undo]   # --undo 撤销误记的一次
 pomo reset-today            # 清零今日成果
 pomo edit 2 -p P0 -d 明天    # 改优先级 / DDL；-p none、-d none 清空
-pomo sync                   # 立即同步 Notion
+pomo sync                   # 立即同步 Notion 任务
+pomo log-today              # 立即同步今日番茄记录到 Notion
 pomo --json tasks           # 任何命令加 --json 输出原始 JSON
 ```
 
@@ -48,7 +49,8 @@ pomo --json tasks           # 任何命令加 --json 输出原始 JSON
 | POST | `/v1/timer/phase` | `{phase: "focus" \| "short" \| "long"}` |
 | POST | `/v1/interruptions` | `{kind: "internal" \| "external", undo?: true}`，仅专注阶段；`undo` 撤销本番茄内误记的一次 |
 | POST | `/v1/stats/reset` | 清零今日成果（番茄数、专注时长、打断、作废、本组进度） |
-| POST | `/v1/notion/sync` | 立即同步 Notion，返回 `{ok, count, tasks}` |
+| POST | `/v1/notion/sync` | 立即同步 Notion 任务，返回 `{ok, count, tasks}` |
+| POST | `/v1/notion/log-today` | 立即将今日（及未补传的历史跨天）番茄统计同步写入 Notion 每日记录库 |
 
 `{ref}` = 序号或 id 前缀。错误返回 `{"error": "..."}` 和对应状态码（400 / 401 / 404 / 409）。
 
@@ -71,6 +73,8 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/
   - **置顶 / Top 3**：`Top 3` / `Focus` / `Important` / `重点` / `置顶` 等 `checkbox` 字段
   - **标签**：`Course` / `Category` / `Project` / `Tag` / `项目` / `分类` / `标签`（`select` 或 `multi_select`）
 - **筛选范围**：未完成任务中，满足「计划日期 = 今天」或「截止日期 ≤ 今天 + N 天（含已逾期，N 默认 7，可在设置调整 1–30 天）」或「置顶勾选」的任务；若数据库不含这些日期/置顶列，则拉取全部未完成任务。
+- **分类排除（`excludedCategories`）**：支持在设置 →「同步与接口」填写逗号分隔的排除分类（默认 `Event`），命中的条目不会拉入「今日待办」，仍可保留在 Notion 日历视图中。
 - **同步时机**：App 启动时、之后每 30 分钟、点「今日待办」旁的 Notion 按钮，或 `pomo sync`。
 - **回写（默认关闭）**：在设置 →「同步与接口」里打开后，番茄钟里勾选完成会自动把 Notion 中识别到的状态改为完成态（或勾选完成复选框）。
+- **每日记录同步（`Pomodoro Log`）**：可在设置 →「同步与接口」配置每日记录数据库链接或 ID。每完成一个番茄钟会实时按当天日期幂等写入/更新对应记录；跨天启动或日期切换时会自动将未上传的昨日成果放入待传队列（`pendingDailyLogs`），联网或触发同步时自动补传，也可随时运行 `pomo log-today` 手动同步。推荐列名：`Day`（Title）、`Date`（Date）、`Pomodoros`、`Focus Minutes`、`Internal Interruptions`、`External Interruptions`、`Voided`（Number）与 `Tasks`（Rich text）。
 - **配置文件**：macOS 为 `~/Library/Application Support/Pomodoro/notion.json`（权限 600），Windows 为 `%APPDATA%\Pomodoro\notion.json`。

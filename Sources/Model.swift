@@ -33,6 +33,7 @@ enum Key {
     static let tasks = "tasks"
     static let currentTask = "currentTaskID"
     static let stats = "dayStats"
+    static let pendingLogs = "pendingDailyLogs"
     // 第一版遗留的键，仅用于迁移
     static let legacyTaskName = "taskName"
     static let legacyStatsDate = "statsDate"
@@ -121,7 +122,22 @@ struct DayStats: Codable, Equatable {
     var internalBreaks = 0
     var externalBreaks = 0
     var focusSeconds: Double = 0
+    var taskPomodoros: [String: Int]? = nil
     var interruptions: Int { internalBreaks + externalBreaks }
+    var hasActivity: Bool {
+        completed > 0 || focusSeconds >= 60 || internalBreaks > 0 || externalBreaks > 0 || voided > 0
+    }
+}
+
+/// 同步到 Notion 的每日汇总记录
+struct DailyLogEntry: Codable, Equatable {
+    var day: String
+    var completed: Int
+    var focusMinutes: Int
+    var internalBreaks: Int
+    var externalBreaks: Int
+    var voided: Int
+    var taskSummary: String
 }
 
 enum BreakTips {
@@ -180,6 +196,10 @@ final class TimerModel: ObservableObject {
 
     /// 任务被标记完成时回调（用于回写 Notion）
     var onTaskFinished: ((TaskItem) -> Void)?
+    /// 跨天产生待归档日志时回调
+    var onDailyLogReady: (() -> Void)?
+    /// 完成一个番茄时回调（实时同步当日 Notion 记录）
+    var onFocusCompleted: ((DailyLogEntry) -> Void)?
 
     private(set) var endDate: Date?
     private var sessionTouched = false
@@ -195,10 +215,13 @@ final class TimerModel: ObservableObject {
             Key.autoStart: false, Key.sound: true, Key.onTop: false, Key.autoFullScreen: true,
             Key.appearance: "light", Key.menuBar: true,
         ])
-        let (loadedStats, rolledOver) = loadStats()
+        let (loadedStats, expiredStats) = loadStats()
         stats = loadedStats
         tasks = load([TaskItem].self, Key.tasks) ?? []
-        if rolledOver {
+        if let old = expiredStats {
+            if old.hasActivity {
+                enqueueDailyLog(Self.makeDailyLog(from: old))
+            }
             tasks.removeAll { $0.finished }
             saveStats()
         }
@@ -470,30 +493,73 @@ final class TimerModel: ObservableObject {
     }
 
     /// 解析「今天 / 明天 / 后天 / 11-25 / 11/25 / 2026-11-25」
-    static func parseDay<S: StringProtocol>(_ s: S) -> Date? {
+    static func parseDay<S: StringProtocol>(_ s: S, relativeTo now: Date = Date()) -> Date? {
         let cal = Calendar.current
-        let today = cal.startOfDay(for: Date())
+        let today = cal.startOfDay(for: now)
         switch s {
         case "今天", "today": return today
         case "明天", "tomorrow": return cal.date(byAdding: .day, value: 1, to: today)
         case "后天": return cal.date(byAdding: .day, value: 2, to: today)
         default: break
         }
-        let parts = s.split(whereSeparator: { $0 == "-" || $0 == "/" || $0 == "." }).compactMap { Int($0) }
-        var c = cal.dateComponents([.year], from: today)
+        let fields = s.split(omittingEmptySubsequences: false) { $0 == "-" || $0 == "/" || $0 == "." }
+        let parts = fields.compactMap { $0.allSatisfy(\.isNumber) ? Int($0) : nil }
+        guard parts.count == fields.count else { return nil }
+        var c = DateComponents()
         switch parts.count {
-        case 2: (c.month, c.day) = (parts[0], parts[1])
+        case 2:
+            let monthDay = (cal.component(.month, from: today), cal.component(.day, from: today))
+            let year = cal.component(.year, from: today)
+            c.year = (parts[0], parts[1]) < monthDay ? year + 1 : year
+            (c.month, c.day) = (parts[0], parts[1])
         case 3: (c.year, c.month, c.day) = (parts[0], parts[1], parts[2])
         default: return nil
         }
-        guard let date = cal.date(from: c) else { return nil }
-        // 没写年份且日期已过 → 视为明年
-        if parts.count == 2, date < today { return cal.date(byAdding: .year, value: 1, to: date) }
-        return date
+        guard c.isValidDate(in: cal) else { return nil }
+        return cal.date(from: c)
     }
 
     /// 跨天检查（定时调用）：清零今日统计、清掉昨天已完成的任务
     func refreshDay() { ensureToday() }
+
+    static func makeDailyLog(from s: DayStats) -> DailyLogEntry {
+        let summary = (s.taskPomodoros ?? [:])
+            .sorted { a, b in a.value != b.value ? a.value > b.value : a.key < b.key }
+            .map { "\($0.key) (\($0.value)🍅)" }
+            .joined(separator: "、")
+        return DailyLogEntry(
+            day: s.day,
+            completed: s.completed,
+            focusMinutes: Int(s.focusSeconds / 60),
+            internalBreaks: s.internalBreaks,
+            externalBreaks: s.externalBreaks,
+            voided: s.voided,
+            taskSummary: summary
+        )
+    }
+
+    func currentDailyLog() -> DailyLogEntry {
+        ensureToday()
+        return Self.makeDailyLog(from: stats)
+    }
+
+    func pendingDailyLogs() -> [DailyLogEntry] {
+        load([DailyLogEntry].self, Key.pendingLogs) ?? []
+    }
+
+    func enqueueDailyLog(_ entry: DailyLogEntry) {
+        var list = pendingDailyLogs()
+        list.removeAll { $0.day == entry.day }
+        list.append(entry)
+        list.sort { $0.day < $1.day }
+        save(list, Key.pendingLogs)
+    }
+
+    func removePendingDailyLog(day: String) {
+        var list = pendingDailyLogs()
+        list.removeAll { $0.day == day }
+        save(list, Key.pendingLogs)
+    }
 
     // MARK: 内部
 
@@ -539,9 +605,18 @@ final class TimerModel: ObservableObject {
                 ensureToday()
                 stats.completed += 1
                 stats.focusSeconds += total
+                if let i = tasks.firstIndex(where: { $0.id == currentTaskID }) {
+                    tasks[i].done += 1
+                    var map = stats.taskPomodoros ?? [:]
+                    map[tasks[i].title, default: 0] += 1
+                    stats.taskPomodoros = map
+                }
                 saveStats()
                 streak += 1
-                if let i = tasks.firstIndex(where: { $0.id == currentTaskID }) { tasks[i].done += 1 }
+                let entry = Self.makeDailyLog(from: stats)
+                DispatchQueue.main.async { [weak self] in
+                    self?.onFocusCompleted?(entry)
+                }
             }
             next = streak >= longEvery ? .longBreak : .shortBreak
         } else {
@@ -568,23 +643,30 @@ final class TimerModel: ObservableObject {
     private func ensureToday() {
         let today = Self.dayString()
         if stats.day != today {
+            let old = stats
+            if old.hasActivity {
+                enqueueDailyLog(Self.makeDailyLog(from: old))
+            }
             stats = DayStats(day: today)
             saveStats()
             tasks.removeAll { $0.finished }
+            if old.hasActivity {
+                onDailyLogReady?()
+            }
         }
     }
 
-    private func loadStats() -> (DayStats, Bool) {
+    private func loadStats() -> (DayStats, DayStats?) {
         let today = Self.dayString()
         if let s = load(DayStats.self, Key.stats) {
-            if s.day == today { return (s, false) }
-            return (DayStats(day: today), true)
+            if s.day == today { return (s, nil) }
+            return (DayStats(day: today), s)
         }
         var s = DayStats(day: today)
         if d.string(forKey: Key.legacyStatsDate) == today {
             s.completed = d.integer(forKey: Key.legacyStatsCount)
         }
-        return (s, false)
+        return (s, nil)
     }
 
     private func saveStats() { save(stats, Key.stats) }

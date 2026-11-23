@@ -247,6 +247,25 @@ final class APIServer: ObservableObject {
                 }
             }
 
+        case ("POST", "notion", 2) where rest[1] == "log-today":
+            NotionSync.shared.syncDailyLogNow(includeToday: true) { result in
+                switch result {
+                case .success(let entry):
+                    reply(200, [
+                        "ok": true,
+                        "day": entry.day,
+                        "completed": entry.completed,
+                        "focusMinutes": entry.focusMinutes,
+                        "internalInterruptions": entry.internalBreaks,
+                        "externalInterruptions": entry.externalBreaks,
+                        "voided": entry.voided,
+                        "tasks": entry.taskSummary,
+                    ])
+                case .failure(let e):
+                    reply(409, ["ok": false, "error": e.localizedDescription])
+                }
+            }
+
         default:
             reply(404, ["error": "未知路径，见 docs/API.md"])
         }

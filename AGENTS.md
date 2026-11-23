@@ -13,11 +13,11 @@ macOS & Windows 桌面番茄钟。macOS 版采用原生 SwiftUI（拖到 Sidecar
 ## 目录结构
 ```
 Sources/main.swift              App 入口、菜单命令
-Sources/Model.swift             Phase / Key / TaskItem（含优先级、DDL、Notion 字段）/ DDL 描述 / TimerModel（计时、任务、统计、合并 Notion）
+Sources/Model.swift             Phase / Key / TaskItem（含优先级、DDL、Notion 字段）/ DayStats & DailyLogEntry / TimerModel（计时、任务、统计、跨天归档、合并 Notion）
 Sources/WindowManager.swift     屏幕识别（Sidecar）、自动全屏、发送到 iPad / 移回 Mac、迷你窗、全局快捷键
 Sources/MenuBarController.swift macOS 顶部菜单栏实时倒计时与快捷控制菜单
-Sources/NotionSync.swift        Notion URL/ID 提取、Schema 自动探测、拉取 / 解析 / 回写，配置 notion.json
-Sources/APIServer.swift         本机 HTTP 接口（路由、序列化），配置 api.json
+Sources/NotionSync.swift        Notion URL/ID 提取、Schema 自动探测、分类排除、拉取 / 解析 / 回写、每日记录幂等/队列同步，配置 notion.json
+Sources/APIServer.swift         本机 HTTP 接口（路由、序列化，含 `/v1/notion/log-today`），配置 api.json
 Sources/Theme.swift             Theme（纸色 / 深咖）、Typo 字体、PressStyle
 Sources/Components.swift        进度环、阶段切换、按钮、任务列表 / 行（点击展开完整名称）、优先级标签、打断记录等组件
 Sources/Layouts.swift           ContentView（选布局、主题）、横屏 / 竖屏 / 迷你三种布局、工具栏、设置（三个分页）
@@ -63,6 +63,13 @@ defaults read local.pomodoro.app          # 查看 macOS 设置、任务、今�
 ## 注意事项
 - 计时中 `beginActivity(.idleDisplaySleepDisabled)` 阻止息屏，否则随航会断开
 - 全局快捷键（空格 开始暂停 / `-` 内部打断 / `=` 外部打断）由 `KeyMonitor` 按物理键码拦截（中文输入法下也有效），第一响应者是文本框时放行；带 ⌘⌥⌃⇧ 修饰键或按住连发时不触发
-- Notion 令牌和数据库 ID 只能由用户自己在设置里填写；回写 Notion 默认关闭
+- Notion 令牌和数据库 ID 只能由用户自己在设置里填写；回写 Notion 默认关闭；默认排除分类（`excludedCategories`）为 `["Event"]`；每日记录同步通过 `pendingDailyLogs` 队列保证跨天/断网补传，支持 `POST /v1/notion/log-today` / `pomo log-today`
 - 本地接口必须保持只监听回环 + 令牌校验
 - `.ai/` 为本地交接目录，不提交到 Git
+- 本仓库是**公开**仓库：不要提交真实的 Notion 令牌、数据库 ID、个人任务数据；测试里只用假 ID
+
+## 云端会话（Claude Code on the web 等 Linux 沙箱）
+- **macOS 版编译不了**（SwiftUI / AppKit 只在 macOS 上有），`./build.sh` 只能在 Mac 上跑；改 `Sources/` 只能靠阅读和推理，交给用户本机构建验证。
+- **Windows 版的逻辑测试可以跑**：`cd windows && npm ci && npm test`（`node --test`，不需要启动 Electron 界面）。`node test/smoke-win.js` 和 `npm run dist:win` 需要图形界面或 Windows，云端不跑。
+- `tools/pomo` 是纯 Python 标准库，可以在云端做语法检查（`python3 -m py_compile tools/pomo`）。
+- 发版走 GitHub Actions：推 `v*` 标签后 `.github/workflows/release.yml` 会在 GitHub 的 macOS / Windows 机器上构建双平台成品，这一步不依赖本机。

@@ -13,7 +13,7 @@ const {
   clipboard,
 } = require("electron");
 const { TimerModel, PHASE_TITLES } = require("./model");
-const { NotionSync, extractID } = require("./notion");
+const { NotionSync, extractID, parseCategories } = require("./notion");
 const { APIServer } = require("./api-server");
 
 const NORMAL_SIZE = { width: 440, height: 640 };
@@ -463,7 +463,7 @@ function registerIPC() {
     broadcastState();
   });
 
-  ipcMain.handle("pomo:notion-save-sync", async (_e, { token, tokenKeep, target }) => {
+  ipcMain.handle("pomo:notion-save-sync", async (_e, { token, tokenKeep, target, excludedText }) => {
     const cleanTarget = String(target || "").trim();
     notion.update((cfg) => {
       if (!tokenKeep) {
@@ -474,11 +474,45 @@ function registerIPC() {
         cfg.dataSourceID = extracted;
         cfg.databaseID = extracted;
       }
+      if (typeof excludedText === "string") {
+        cfg.excludedCategories = parseCategories(excludedText);
+      }
     });
     try {
       await notion.sync();
     } catch {
       // error status is stored on notion.lastError and broadcast to UI
+    }
+    return notion.getStatus();
+  });
+
+  ipcMain.handle("pomo:notion-log-save-sync", async (_e, { token, tokenKeep, logTarget }) => {
+    const cleanTarget = String(logTarget || "").trim();
+    notion.update((cfg) => {
+      if (!tokenKeep) {
+        cfg.token = String(token || "").trim();
+      }
+      if (cleanTarget !== (cfg.logDataSourceID || cfg.logDatabaseID)) {
+        const extracted = extractID(cleanTarget);
+        cfg.logDataSourceID = extracted;
+        cfg.logDatabaseID = extracted;
+      }
+    });
+    if (notion.getStatus().logConfigured) {
+      try {
+        await notion.syncDailyLogNow(true);
+      } catch {
+        // error status is stored on notion.lastLogError and broadcast to UI
+      }
+    }
+    return notion.getStatus();
+  });
+
+  ipcMain.handle("pomo:notion-log-now", async () => {
+    try {
+      await notion.syncDailyLogNow(true);
+    } catch {
+      // error status is broadcast
     }
     return notion.getStatus();
   });

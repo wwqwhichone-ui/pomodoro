@@ -94,10 +94,10 @@ function formatLocalISO(date) {
   );
 }
 
-function parseDay(raw) {
+function parseDay(raw, now = new Date()) {
   const s = String(raw || "").trim();
   if (!s) return null;
-  const today = startOfLocalDay(new Date());
+  const today = startOfLocalDay(now);
   const lower = s.toLowerCase();
   if (s === "今天" || lower === "today") return today;
   if (s === "明天" || lower === "tomorrow") {
@@ -106,7 +106,7 @@ function parseDay(raw) {
   if (s === "后天") {
     return new Date(today.getFullYear(), today.getMonth(), today.getDate() + 2);
   }
-  const parts = s.split(/[-/.]/).filter(Boolean);
+  const parts = s.split(/[-/.]/);
   if (parts.some((p) => !/^\d+$/.test(p))) return null;
   const nums = parts.map(Number);
   let y = today.getFullYear();
@@ -114,18 +114,17 @@ function parseDay(raw) {
   let d;
   if (nums.length === 2) {
     [m, d] = nums;
+    const month = today.getMonth() + 1;
+    if (m < month || (m === month && d < today.getDate())) y++;
   } else if (nums.length === 3) {
     [y, m, d] = nums;
   } else {
     return null;
   }
   if (y < 1970 || m < 1 || m > 12 || d < 1 || d > 31) return null;
-  let candidate = new Date(y, m - 1, d, 0, 0, 0, 0);
+  const candidate = new Date(y, m - 1, d, 0, 0, 0, 0);
   if (candidate.getFullYear() !== y || candidate.getMonth() !== m - 1 || candidate.getDate() !== d) {
     return null;
-  }
-  if (nums.length === 2 && candidate < today) {
-    candidate = new Date(y + 1, m - 1, d, 0, 0, 0, 0);
   }
   return candidate;
 }
@@ -202,6 +201,35 @@ function makeEmptyStats(day = localDayString()) {
     internalBreaks: 0,
     externalBreaks: 0,
     focusSeconds: 0,
+    taskPomodoros: {},
+  };
+}
+
+function hasStatsActivity(s) {
+  if (!s) return false;
+  return (
+    (s.completed || 0) > 0 ||
+    (s.focusSeconds || 0) >= 60 ||
+    (s.internalBreaks || 0) > 0 ||
+    (s.externalBreaks || 0) > 0 ||
+    (s.voided || 0) > 0
+  );
+}
+
+function makeDailyLog(s) {
+  const map = s?.taskPomodoros && typeof s.taskPomodoros === "object" ? s.taskPomodoros : {};
+  const taskSummary = Object.entries(map)
+    .sort((a, b) => (b[1] !== a[1] ? b[1] - a[1] : a[0].localeCompare(b[0])))
+    .map(([title, cnt]) => `${title} (${cnt}🍅)`)
+    .join("、");
+  return {
+    day: s.day,
+    completed: s.completed || 0,
+    focusMinutes: Math.floor((s.focusSeconds || 0) / 60),
+    internalBreaks: s.internalBreaks || 0,
+    externalBreaks: s.externalBreaks || 0,
+    voided: s.voided || 0,
+    taskSummary,
   };
 }
 
@@ -215,12 +243,19 @@ class TimerModel extends EventEmitter {
     this.settings = { ...DEFAULT_SETTINGS, ...(saved.settings || {}) };
     this._clampSettings();
 
+    this.pendingDailyLogs = Array.isArray(saved.pendingDailyLogs)
+      ? saved.pendingDailyLogs.map((x) => ({ ...x }))
+      : [];
+
     const today = localDayString();
     let rolledOver = false;
     if (saved.stats && typeof saved.stats === "object") {
       if (saved.stats.day === today) {
         this.stats = { ...makeEmptyStats(today), ...saved.stats };
       } else {
+        if (hasStatsActivity(saved.stats)) {
+          this._enqueueDailyLogInMemory(makeDailyLog(saved.stats));
+        }
         this.stats = makeEmptyStats(today);
         rolledOver = true;
       }
@@ -272,7 +307,29 @@ class TimerModel extends EventEmitter {
       tasks: this.tasks,
       currentTaskID: this.currentTaskID,
       stats: this.stats,
+      pendingDailyLogs: this.pendingDailyLogs,
     });
+  }
+
+  _enqueueDailyLogInMemory(entry) {
+    this.pendingDailyLogs = this.pendingDailyLogs.filter((x) => x.day !== entry.day);
+    this.pendingDailyLogs.push(entry);
+    this.pendingDailyLogs.sort((a, b) => a.day.localeCompare(b.day));
+  }
+
+  enqueueDailyLog(entry) {
+    this._enqueueDailyLogInMemory(entry);
+    this._save();
+  }
+
+  removePendingDailyLog(day) {
+    this.pendingDailyLogs = this.pendingDailyLogs.filter((x) => x.day !== day);
+    this._save();
+  }
+
+  currentDailyLog() {
+    this.ensureToday();
+    return makeDailyLog(this.stats);
   }
 
   _emitChange() {
@@ -619,10 +676,18 @@ class TimerModel extends EventEmitter {
   ensureToday() {
     const today = localDayString();
     if (this.stats.day !== today) {
+      const old = this.stats;
+      const active = hasStatsActivity(old);
+      if (active) {
+        this._enqueueDailyLogInMemory(makeDailyLog(old));
+      }
       this.stats = makeEmptyStats(today);
       this.tasks = this.tasks.filter((t) => !t.finished);
       if (!this.currentTask) this._autoSelect();
       this._save();
+      if (active) {
+        this.emit("dailyLogReady");
+      }
       return true;
     }
     return false;
@@ -688,9 +753,16 @@ class TimerModel extends EventEmitter {
         this.streak += 1;
         if (this.currentTaskID) {
           const idx = this.tasks.findIndex((t) => t.id === this.currentTaskID);
-          if (idx !== -1) this.tasks[idx].done = (this.tasks[idx].done || 0) + 1;
+          if (idx !== -1) {
+            this.tasks[idx].done = (this.tasks[idx].done || 0) + 1;
+            const title = this.tasks[idx].title;
+            const map = { ...(this.stats.taskPomodoros || {}) };
+            map[title] = (map[title] || 0) + 1;
+            this.stats.taskPomodoros = map;
+          }
         }
         this._save();
+        this.emit("focusCompleted", makeDailyLog(this.stats));
       }
       next = this.streak >= this.longEvery ? Phase.longBreak : Phase.shortBreak;
     } else {
@@ -807,6 +879,8 @@ module.exports = {
   DEFAULT_SETTINGS,
   DDL,
   TimerModel,
+  hasStatsActivity,
+  makeDailyLog,
   localDayString,
   formatHM,
   formatDuration,

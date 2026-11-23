@@ -1,4 +1,5 @@
-// Notion 同步：自动探测任意任务数据库结构，拉取「今天要做 / 近期到期 / 已逾期 / 置顶」且未完成的任务。
+// Notion 同步：自动探测任意任务数据库结构，拉取「今天要做 / 近期到期 / 已逾期 / 置顶」且未完成的任务，
+// 支持按分类（如 Event 活动）排除过滤，并支持每日番茄钟成果按日期去重同步到 Notion 日志库。
 // 令牌与数据库 ID 存在 ~/Library/Application Support/Pomodoro/notion.json（权限 600）。
 import Foundation
 import AppKit
@@ -12,6 +13,11 @@ struct NotionConfig: Codable {
     var writeBack: Bool = false
     /// DDL 往后看几天
     var lookaheadDays: Int = 7
+    /// 排除不进入「今日待办」的分类名（例如 Event、活动、会议）
+    var excludedCategories: [String] = ["Event"]
+    /// 每日番茄记录数据库（如 Pomodoro Log）的 data source / database ID
+    var logDataSourceID: String = ""
+    var logDatabaseID: String = ""
 
     init() {}
 
@@ -23,6 +29,9 @@ struct NotionConfig: Codable {
         writeBack = try c.decodeIfPresent(Bool.self, forKey: .writeBack) ?? false
         let days = try c.decodeIfPresent(Int.self, forKey: .lookaheadDays) ?? 7
         lookaheadDays = min(90, max(1, days))
+        excludedCategories = try c.decodeIfPresent([String].self, forKey: .excludedCategories) ?? ["Event"]
+        logDataSourceID = try c.decodeIfPresent(String.self, forKey: .logDataSourceID) ?? ""
+        logDatabaseID = try c.decodeIfPresent(String.self, forKey: .logDatabaseID) ?? ""
     }
 
     var trimmedToken: String { token.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -30,9 +39,75 @@ struct NotionConfig: Codable {
     var trimmedDatabaseID: String { databaseID.trimmingCharacters(in: .whitespacesAndNewlines) }
     var targetInput: String { !trimmedDataSourceID.isEmpty ? trimmedDataSourceID : trimmedDatabaseID }
     var isConfigured: Bool { !trimmedToken.isEmpty && (!trimmedDataSourceID.isEmpty || !trimmedDatabaseID.isEmpty) }
+
+    var trimmedLogDataSourceID: String { logDataSourceID.trimmingCharacters(in: .whitespacesAndNewlines) }
+    var trimmedLogDatabaseID: String { logDatabaseID.trimmingCharacters(in: .whitespacesAndNewlines) }
+    var logTargetInput: String { !trimmedLogDataSourceID.isEmpty ? trimmedLogDataSourceID : trimmedLogDatabaseID }
+    var isLogConfigured: Bool { !trimmedToken.isEmpty && (!trimmedLogDataSourceID.isEmpty || !trimmedLogDatabaseID.isEmpty) }
+    var excludedCategoriesText: String { excludedCategories.joined(separator: ", ") }
+
+    static func parseCategories(_ raw: String) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        let seps = CharacterSet(charactersIn: ",，")
+        for part in raw.components(separatedBy: seps) {
+            let clean = part.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !clean.isEmpty else { continue }
+            let lower = clean.lowercased()
+            if !seen.contains(lower) {
+                seen.insert(lower)
+                result.append(clean)
+            }
+        }
+        return result
+    }
 }
 
-/// 从任意 Notion 数据库自动探测出的字段映射
+private enum SchemaMatch {
+    typealias PropEntry = (name: String, prop: [String: Any], type: String)
+
+    static func databaseTitle(from json: [String: Any]) -> String? {
+        guard let titleArr = json["title"] as? [[String: Any]] else { return nil }
+        let t = titleArr.compactMap { $0["plain_text"] as? String }.joined()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.isEmpty ? nil : t
+    }
+
+    static func entries(from json: [String: Any]) -> [PropEntry] {
+        guard let props = json["properties"] as? [String: [String: Any]] else { return [] }
+        return props.map { (name: $0.key, prop: $0.value, type: ($0.value["type"] as? String ?? "")) }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    static func findMatching(_ entries: [PropEntry], type: String, keywords: [String],
+                             excluding used: Set<String>, avoidInSubstring: [String] = []) -> PropEntry? {
+        findMatching(entries, types: [type], keywords: keywords, excluding: used, avoidInSubstring: avoidInSubstring)
+    }
+
+    static func findMatching(_ entries: [PropEntry], types: [String], keywords: [String],
+                             excluding used: Set<String>, avoidInSubstring: [String] = []) -> PropEntry? {
+        let candidates = entries.filter { types.contains($0.type) && !used.contains($0.name) }
+        for kw in keywords {
+            if let exact = candidates.first(where: {
+                $0.name.trimmingCharacters(in: .whitespaces).lowercased() == kw
+            }) {
+                return exact
+            }
+        }
+        for kw in keywords {
+            if let sub = candidates.first(where: { entry in
+                let l = entry.name.trimmingCharacters(in: .whitespaces).lowercased()
+                guard l.contains(kw) else { return false }
+                return !avoidInSubstring.contains { l.contains($0) }
+            }) {
+                return sub
+            }
+        }
+        return nil
+    }
+}
+
+/// 从任意 Notion 任务数据库自动探测出的字段映射
 struct NotionSchema: Equatable {
     var databaseTitle: String?
     var titleProp: String?
@@ -44,23 +119,19 @@ struct NotionSchema: Equatable {
     var scheduledProp: String?
     var priorityProp: String?
     var top3Prop: String?
+    var categoryProp: String?
+    var categoryType: String? // "select" | "multi_select"
+    var categoryOptions: [String] = []
     var tagProps: [String] = []
 
     static func detect(from json: [String: Any]) -> NotionSchema {
         var schema = NotionSchema()
-
-        if let titleArr = json["title"] as? [[String: Any]] {
-            let t = titleArr.compactMap { $0["plain_text"] as? String }.joined()
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            if !t.isEmpty { schema.databaseTitle = t }
-        }
-
-        guard let props = json["properties"] as? [String: [String: Any]] else { return schema }
-        let entries = props.map { (name: $0.key, prop: $0.value, type: ($0.value["type"] as? String ?? "")) }
-            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        schema.databaseTitle = SchemaMatch.databaseTitle(from: json)
+        let entries = SchemaMatch.entries(from: json)
+        guard !entries.isEmpty else { return schema }
         var used = Set<String>()
 
-        // 1. 标题列（Notion 数据库必有且只有一个 title 列）
+        // 1. 标题列
         if let titleEntry = entries.first(where: { $0.type == "title" }) {
             schema.titleProp = titleEntry.name
             used.insert(titleEntry.name)
@@ -71,7 +142,7 @@ struct NotionSchema: Equatable {
         let doneKeywords = ["done", "completed", "complete", "finished", "已完成", "完成"]
         let closedKeywords = doneKeywords + ["archived", "cancelled", "canceled", "已归档", "已取消"]
 
-        if let stEntry = findMatching(entries, type: "status", keywords: statusKeywords, excluding: used)
+        if let stEntry = SchemaMatch.findMatching(entries, type: "status", keywords: statusKeywords, excluding: used)
             ?? entries.first(where: { $0.type == "status" && !used.contains($0.name) }) {
             schema.statusProp = stEntry.name
             schema.statusType = "status"
@@ -110,7 +181,7 @@ struct NotionSchema: Equatable {
                     return !closedKeywords.contains { l == $0 || l.contains($0) }
                 }
             }
-        } else if let selEntry = findMatching(entries, type: "select", keywords: statusKeywords, excluding: used) {
+        } else if let selEntry = SchemaMatch.findMatching(entries, type: "select", keywords: statusKeywords, excluding: used) {
             schema.statusProp = selEntry.name
             schema.statusType = "select"
             used.insert(selEntry.name)
@@ -124,43 +195,52 @@ struct NotionSchema: Equatable {
                 let l = name.trimmingCharacters(in: .whitespaces).lowercased()
                 return !closedKeywords.contains { l == $0 || l.contains($0) }
             }
-        } else if let chkEntry = findMatching(entries, type: "checkbox", keywords: doneKeywords, excluding: used) {
+        } else if let chkEntry = SchemaMatch.findMatching(entries, type: "checkbox", keywords: doneKeywords, excluding: used) {
             schema.statusProp = chkEntry.name
             schema.statusType = "checkbox"
             used.insert(chkEntry.name)
         }
 
-        // 3. 截止日期列（避开 scheduled / do date / 计划 避免子串误判）
+        // 3. 截止日期列
         let dueKeywords = ["due date", "due", "ddl", "deadline", "截止日期", "截止时间", "截止", "date", "日期"]
         let scheduledGuard = ["scheduled", "do date", "plan", "计划", "开始"]
-        if let due = findMatching(entries, type: "date", keywords: dueKeywords, excluding: used,
-                                  avoidInSubstring: scheduledGuard) {
+        if let due = SchemaMatch.findMatching(entries, type: "date", keywords: dueKeywords, excluding: used,
+                                              avoidInSubstring: scheduledGuard) {
             schema.dueProp = due.name
             used.insert(due.name)
         }
 
         // 4. 计划日期列
         let scheduledKeywords = ["scheduled date", "scheduled", "do date", "plan date", "计划日期", "安排日期", "计划", "开始日期"]
-        if let sched = findMatching(entries, type: "date", keywords: scheduledKeywords, excluding: used) {
+        if let sched = SchemaMatch.findMatching(entries, type: "date", keywords: scheduledKeywords, excluding: used) {
             schema.scheduledProp = sched.name
             used.insert(sched.name)
         }
 
         // 5. 优先级列
         let priorityKeywords = ["priority", "优先级", "紧急", "级别"]
-        if let prio = findMatching(entries, types: ["select", "status"], keywords: priorityKeywords, excluding: used) {
+        if let prio = SchemaMatch.findMatching(entries, types: ["select", "status"], keywords: priorityKeywords, excluding: used) {
             schema.priorityProp = prio.name
             used.insert(prio.name)
         }
 
         // 6. 置顶 / Top 3 列
         let top3Keywords = ["top 3", "top3", "focus", "pinned", "important", "重点", "置顶", "今日重点"]
-        if let top3 = findMatching(entries, type: "checkbox", keywords: top3Keywords, excluding: used) {
+        if let top3 = SchemaMatch.findMatching(entries, type: "checkbox", keywords: top3Keywords, excluding: used) {
             schema.top3Prop = top3.name
             used.insert(top3.name)
         }
 
-        // 7. 标签 / 课程 / 分类列（按关键词优先顺序收集）
+        // 6.5. 分类列（用于排除过滤，不放入 used 以保持副标题标签兼容）
+        let categoryKeywords = ["category", "type", "kind", "分类", "类别", "类型"]
+        if let cat = SchemaMatch.findMatching(entries, types: ["select", "multi_select"], keywords: categoryKeywords, excluding: used) {
+            schema.categoryProp = cat.name
+            schema.categoryType = cat.type
+            let options = ((cat.prop[cat.type] as? [String: Any])?["options"] as? [[String: Any]]) ?? []
+            schema.categoryOptions = options.compactMap { $0["name"] as? String }
+        }
+
+        // 7. 标签 / 课程 / 分类列
         let tagKeywords = ["course", "category", "project", "area", "tag", "tags", "课程", "分类", "项目", "标签"]
         var tags: [String] = []
         for kw in tagKeywords {
@@ -176,34 +256,73 @@ struct NotionSchema: Equatable {
 
         return schema
     }
+}
 
-    private typealias PropEntry = (name: String, prop: [String: Any], type: String)
+/// 从任意 Notion 每日记录数据库（如 Pomodoro Log）自动探测出的字段映射
+struct NotionLogSchema: Equatable {
+    var databaseTitle: String?
+    var titleProp: String?
+    var dateProp: String?
+    var completedProp: String?
+    var focusMinutesProp: String?
+    var internalProp: String?
+    var externalProp: String?
+    var voidedProp: String?
+    var tasksProp: String?
 
-    private static func findMatching(_ entries: [PropEntry], type: String, keywords: [String],
-                                     excluding used: Set<String>, avoidInSubstring: [String] = []) -> PropEntry? {
-        findMatching(entries, types: [type], keywords: keywords, excluding: used, avoidInSubstring: avoidInSubstring)
-    }
+    static func detect(from json: [String: Any]) -> NotionLogSchema {
+        var schema = NotionLogSchema()
+        schema.databaseTitle = SchemaMatch.databaseTitle(from: json)
+        let entries = SchemaMatch.entries(from: json)
+        guard !entries.isEmpty else { return schema }
+        var used = Set<String>()
 
-    private static func findMatching(_ entries: [PropEntry], types: [String], keywords: [String],
-                                     excluding used: Set<String>, avoidInSubstring: [String] = []) -> PropEntry? {
-        let candidates = entries.filter { types.contains($0.type) && !used.contains($0.name) }
-        for kw in keywords {
-            if let exact = candidates.first(where: {
-                $0.name.trimmingCharacters(in: .whitespaces).lowercased() == kw
-            }) {
-                return exact
-            }
+        if let t = entries.first(where: { $0.type == "title" }) {
+            schema.titleProp = t.name
+            used.insert(t.name)
         }
-        for kw in keywords {
-            if let sub = candidates.first(where: { entry in
-                let l = entry.name.trimmingCharacters(in: .whitespaces).lowercased()
-                guard l.contains(kw) else { return false }
-                return !avoidInSubstring.contains { l.contains($0) }
-            }) {
-                return sub
-            }
+        if let d = SchemaMatch.findMatching(entries, type: "date", keywords: ["date", "day", "日期", "时间"], excluding: used) {
+            schema.dateProp = d.name
+            used.insert(d.name)
         }
-        return nil
+        if let p = SchemaMatch.findMatching(entries, type: "number",
+                                            keywords: ["pomodoros", "pomodoro", "completed", "count", "番茄数", "番茄", "完成数", "完成"],
+                                            excluding: used) {
+            schema.completedProp = p.name
+            used.insert(p.name)
+        }
+        if let m = SchemaMatch.findMatching(entries, type: "number",
+                                            keywords: ["focus minutes", "minutes", "focus", "duration", "专注分钟", "专注时长", "分钟", "时长"],
+                                            excluding: used) {
+            schema.focusMinutesProp = m.name
+            used.insert(m.name)
+        }
+        if let i = SchemaMatch.findMatching(entries, type: "number",
+                                            keywords: ["internal interruptions", "internal breaks", "internal", "内部打断", "内打断"],
+                                            excluding: used) {
+            schema.internalProp = i.name
+            used.insert(i.name)
+        }
+        if let e = SchemaMatch.findMatching(entries, type: "number",
+                                            keywords: ["external interruptions", "external breaks", "external", "外部打断", "外打断"],
+                                            excluding: used) {
+            schema.externalProp = e.name
+            used.insert(e.name)
+        }
+        if let v = SchemaMatch.findMatching(entries, type: "number",
+                                            keywords: ["voided", "void", "abandoned", "作废", "放弃"],
+                                            excluding: used) {
+            schema.voidedProp = v.name
+            used.insert(v.name)
+        }
+        if let s = SchemaMatch.findMatching(entries, type: "rich_text",
+                                            keywords: ["tasks", "task summary", "summary", "notes", "任务", "任务明细", "摘要", "备注"],
+                                            excluding: used) {
+            schema.tasksProp = s.name
+            used.insert(s.name)
+        }
+
+        return schema
     }
 }
 
@@ -232,10 +351,16 @@ final class NotionSync: ObservableObject {
     @Published private(set) var lastError: String?
     @Published private(set) var databaseTitle: String?
 
+    @Published private(set) var logSyncing = false
+    @Published private(set) var lastLogSync: Date?
+    @Published private(set) var lastLogError: String?
+    @Published private(set) var logDatabaseTitle: String?
+
     private weak var model: TimerModel?
     private var timer: Timer?
     private let fileURL = AppFiles.dir.appendingPathComponent("notion.json")
     private var cachedSchema: (key: String, schema: NotionSchema, useDataSource: Bool)?
+    private var cachedLogSchema: (key: String, schema: NotionLogSchema, useDataSource: Bool)?
 
     init() {
         if let data = try? Data(contentsOf: fileURL),
@@ -246,6 +371,10 @@ final class NotionSync: ObservableObject {
 
     private static func cacheKey(for c: NotionConfig) -> String {
         "\(c.trimmedToken)|\(c.trimmedDataSourceID)|\(c.trimmedDatabaseID)"
+    }
+
+    private static func logCacheKey(for c: NotionConfig) -> String {
+        "\(c.trimmedToken)|\(c.trimmedLogDataSourceID)|\(c.trimmedLogDatabaseID)"
     }
 
     /// 从 Notion 页面链接、32 位十六进制字符串或标准 UUID 中提取并规范化 ID
@@ -270,15 +399,19 @@ final class NotionSync: ObservableObject {
         return "\(hex[i0..<i1])-\(hex[i1..<i2])-\(hex[i2..<i3])-\(hex[i3..<i4])-\(hex[i4...])"
     }
 
-    /// 启动：立即同步一次，之后每 30 分钟一次（同时负责跨天检查）
+    /// 启动：立即同步任务并冲刷每日记录，之后每 30 分钟检查一次
     func start(model: TimerModel) {
         guard self.model == nil else { return }
         self.model = model
         model.onTaskFinished = { [weak self] task in self?.taskFinished(task) }
+        model.onDailyLogReady = { [weak self] in self?.flushPendingLogs(syncTodayIfActive: false) }
+        model.onFocusCompleted = { [weak self] entry in self?.syncFocusCompleted(entry) }
         sync()
+        flushPendingLogs(syncTodayIfActive: true)
         let t = Timer(timeInterval: 30 * 60, repeats: true) { [weak self] _ in
             self?.model?.refreshDay()
             self?.sync()
+            self?.flushPendingLogs(syncTodayIfActive: true)
         }
         RunLoop.main.add(t, forMode: .common)
         timer = t
@@ -286,6 +419,7 @@ final class NotionSync: ObservableObject {
 
     func update(_ change: (inout NotionConfig) -> Void) {
         let oldKey = Self.cacheKey(for: config)
+        let oldLogKey = Self.logCacheKey(for: config)
         change(&config)
         config.lookaheadDays = min(90, max(1, config.lookaheadDays))
         if let data = try? JSONEncoder().encode(config) { AppFiles.writePrivate(data, to: fileURL) }
@@ -293,9 +427,13 @@ final class NotionSync: ObservableObject {
             cachedSchema = nil
             databaseTitle = nil
         }
+        if Self.logCacheKey(for: config) != oldLogKey {
+            cachedLogSchema = nil
+            logDatabaseTitle = nil
+        }
     }
 
-    // MARK: 拉取
+    // MARK: 拉取任务
 
     func sync(completion: ((Result<Int, Error>) -> Void)? = nil) {
         let cfg = config
@@ -334,31 +472,66 @@ final class NotionSync: ObservableObject {
         }
     }
 
+    private func resolveDatabaseSchema<S>(
+        dsID: String, dbID: String, token: String, parse: ([String: Any]) -> S
+    ) async throws -> (schema: S, useDataSource: Bool) {
+        let targetDB = !dbID.isEmpty ? dbID : dsID
+        if !dsID.isEmpty {
+            do {
+                let json = try await request(method: "GET", path: "data_sources/\(dsID)",
+                                             version: "2025-09-03", token: token)
+                return (parse(json), true)
+            } catch SyncError.http(let code, _) where (code == 400 || code == 404) && !targetDB.isEmpty {
+                let json = try await request(method: "GET", path: "databases/\(targetDB)",
+                                             version: "2022-06-28", token: token)
+                return (parse(json), false)
+            }
+        } else {
+            let json = try await request(method: "GET", path: "databases/\(targetDB)",
+                                         version: "2022-06-28", token: token)
+            return (parse(json), false)
+        }
+    }
+
     private func resolveSchema(using cfg: NotionConfig) async throws -> (schema: NotionSchema, useDataSource: Bool) {
         let key = Self.cacheKey(for: cfg)
         let existing = await MainActor.run { self.cachedSchema }
         if let existing, existing.key == key {
             return (existing.schema, existing.useDataSource)
         }
+        return try await resolveDatabaseSchema(
+            dsID: cfg.trimmedDataSourceID, dbID: cfg.trimmedDatabaseID, token: cfg.trimmedToken,
+            parse: NotionSchema.detect(from:)
+        )
+    }
 
-        let dsID = cfg.trimmedDataSourceID
-        let dbID = !cfg.trimmedDatabaseID.isEmpty ? cfg.trimmedDatabaseID : dsID
-
-        if !dsID.isEmpty {
-            do {
-                let json = try await request(method: "GET", path: "data_sources/\(dsID)",
-                                             version: "2025-09-03", token: cfg.trimmedToken)
-                return (NotionSchema.detect(from: json), true)
-            } catch SyncError.http(let code, _) where (code == 400 || code == 404) && !dbID.isEmpty {
-                let json = try await request(method: "GET", path: "databases/\(dbID)",
-                                             version: "2022-06-28", token: cfg.trimmedToken)
-                return (NotionSchema.detect(from: json), false)
-            }
-        } else {
-            let json = try await request(method: "GET", path: "databases/\(dbID)",
-                                         version: "2022-06-28", token: cfg.trimmedToken)
-            return (NotionSchema.detect(from: json), false)
+    private func resolveLogSchema(using cfg: NotionConfig) async throws -> (schema: NotionLogSchema, useDataSource: Bool) {
+        let key = Self.logCacheKey(for: cfg)
+        let existing = await MainActor.run { self.cachedLogSchema }
+        if let existing, existing.key == key {
+            return (existing.schema, existing.useDataSource)
         }
+        return try await resolveDatabaseSchema(
+            dsID: cfg.trimmedLogDataSourceID, dbID: cfg.trimmedLogDatabaseID, token: cfg.trimmedToken,
+            parse: NotionLogSchema.detect(from:)
+        )
+    }
+
+    private func postQuery(dsID: String, dbID: String, useDataSource: Bool,
+                           token: String, body: [String: Any]) async throws -> [String: Any] {
+        let payload = try JSONSerialization.data(withJSONObject: body)
+        let targetDB = !dbID.isEmpty ? dbID : dsID
+        if useDataSource && !dsID.isEmpty {
+            do {
+                return try await request(method: "POST", path: "data_sources/\(dsID)/query",
+                                         version: "2025-09-03", token: token, body: payload)
+            } catch SyncError.http(let code, _) where (code == 400 || code == 404) && !targetDB.isEmpty {
+                return try await request(method: "POST", path: "databases/\(targetDB)/query",
+                                         version: "2022-06-28", token: token, body: payload)
+            }
+        }
+        return try await request(method: "POST", path: "databases/\(targetDB)/query",
+                                 version: "2022-06-28", token: token, body: payload)
     }
 
     private func fetchAll(using cfg: NotionConfig, schema: NotionSchema, useDataSource: Bool) async throws -> [NotionTask] {
@@ -366,7 +539,7 @@ final class NotionSync: ObservableObject {
         var cursor: String?
         repeat {
             let (results, next) = try await queryPage(using: cfg, schema: schema, useDataSource: useDataSource, cursor: cursor)
-            all += results.compactMap { Self.parse($0, schema: schema) }
+            all += results.compactMap { Self.parse($0, schema: schema, excludedCategories: cfg.excludedCategories) }
             cursor = next
         } while cursor != nil && all.count < 500
         return all
@@ -374,26 +547,10 @@ final class NotionSync: ObservableObject {
 
     private func queryPage(using cfg: NotionConfig, schema: NotionSchema,
                            useDataSource: Bool, cursor: String?) async throws -> ([[String: Any]], String?) {
-        var body = Self.filterBody(lookahead: cfg.lookaheadDays, schema: schema)
+        var body = Self.filterBody(lookahead: cfg.lookaheadDays, schema: schema, excludedCategories: cfg.excludedCategories)
         if let cursor { body["start_cursor"] = cursor }
-        let payload = try JSONSerialization.data(withJSONObject: body)
-
-        let dsID = cfg.trimmedDataSourceID
-        let dbID = !cfg.trimmedDatabaseID.isEmpty ? cfg.trimmedDatabaseID : dsID
-
-        let json: [String: Any]
-        if useDataSource && !dsID.isEmpty {
-            do {
-                json = try await request(method: "POST", path: "data_sources/\(dsID)/query",
-                                         version: "2025-09-03", token: cfg.trimmedToken, body: payload)
-            } catch SyncError.http(let code, _) where (code == 400 || code == 404) && !dbID.isEmpty {
-                json = try await request(method: "POST", path: "databases/\(dbID)/query",
-                                         version: "2022-06-28", token: cfg.trimmedToken, body: payload)
-            }
-        } else {
-            json = try await request(method: "POST", path: "databases/\(dbID)/query",
-                                     version: "2022-06-28", token: cfg.trimmedToken, body: payload)
-        }
+        let json = try await postQuery(dsID: cfg.trimmedDataSourceID, dbID: cfg.trimmedDatabaseID,
+                                       useDataSource: useDataSource, token: cfg.trimmedToken, body: body)
         let results = json["results"] as? [[String: Any]] ?? []
         let next = (json["has_more"] as? Bool == true) ? json["next_cursor"] as? String : nil
         return (results, next)
@@ -423,7 +580,7 @@ final class NotionSync: ObservableObject {
     }
 
     /// 仅按实际存在的列构造筛选条件与排序
-    static func filterBody(lookahead: Int, schema: NotionSchema) -> [String: Any] {
+    static func filterBody(lookahead: Int, schema: NotionSchema, excludedCategories: [String] = []) -> [String: Any] {
         let cal = Calendar.current
         let today = cal.startOfDay(for: Date())
         let until = cal.date(byAdding: .day, value: lookahead, to: today) ?? today
@@ -444,6 +601,19 @@ final class NotionSync: ObservableObject {
                 if !schema.openStatuses.isEmpty {
                     let ors = schema.openStatuses.map { ["property": statusProp, "status": ["equals": $0]] }
                     andFilters.append(ors.count == 1 ? ors[0] : ["or": ors])
+                }
+            }
+        }
+
+        if let catProp = schema.categoryProp, !excludedCategories.isEmpty {
+            for raw in excludedCategories {
+                let clean = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !clean.isEmpty else { continue }
+                let matched = schema.categoryOptions.first { $0.caseInsensitiveCompare(clean) == .orderedSame } ?? clean
+                if schema.categoryType == "multi_select" {
+                    andFilters.append(["property": catProp, "multi_select": ["does_not_contain": matched]])
+                } else {
+                    andFilters.append(["property": catProp, "select": ["does_not_equal": matched]])
                 }
             }
         }
@@ -474,9 +644,22 @@ final class NotionSync: ObservableObject {
         return body
     }
 
-    static func parse(_ page: [String: Any], schema: NotionSchema) -> NotionTask? {
+    static func parse(_ page: [String: Any], schema: NotionSchema, excludedCategories: [String] = []) -> NotionTask? {
         guard let id = page["id"] as? String,
               let props = page["properties"] as? [String: Any] else { return nil }
+
+        if let catProp = schema.categoryProp, !excludedCategories.isEmpty,
+           let p = props[catProp] as? [String: Any] {
+            let excludedSet = Set(excludedCategories.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }.filter { !$0.isEmpty })
+            var values: [String] = []
+            if let s = (p["select"] as? [String: Any])?["name"] as? String { values.append(s) }
+            if let arr = p["multi_select"] as? [[String: Any]] {
+                values.append(contentsOf: arr.compactMap { $0["name"] as? String })
+            }
+            if values.contains(where: { excludedSet.contains($0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()) }) {
+                return nil
+            }
+        }
 
         let titleObj: [String: Any]?
         if let key = schema.titleProp, let obj = props[key] as? [String: Any] {
@@ -538,7 +721,143 @@ final class NotionSync: ObservableObject {
         return iso.date(from: s).map { ($0, true) }
     }
 
-    // MARK: 回写
+    // MARK: 每日记录同步（按日期 Upsert）
+
+    func syncDailyLogNow(includeToday: Bool = true, completion: ((Result<DailyLogEntry, Error>) -> Void)? = nil) {
+        let cfg = config
+        guard cfg.isLogConfigured else {
+            completion?(.failure(SyncError.logNotConfigured))
+            return
+        }
+        guard !logSyncing else {
+            completion?(.failure(SyncError.busy))
+            return
+        }
+        logSyncing = true
+        let pending = model?.pendingDailyLogs() ?? []
+        let todayEntry = includeToday ? model?.currentDailyLog() : nil
+        Task {
+            do {
+                var resolved = try await resolveLogSchema(using: cfg)
+                for item in pending {
+                    resolved = try await upsertDailyLog(item, using: cfg, resolved: resolved)
+                    await MainActor.run { self.model?.removePendingDailyLog(day: item.day) }
+                }
+                let finalEntry: DailyLogEntry
+                if let todayEntry {
+                    resolved = try await upsertDailyLog(todayEntry, using: cfg, resolved: resolved)
+                    finalEntry = todayEntry
+                } else if let last = pending.last {
+                    finalEntry = last
+                } else {
+                    finalEntry = await MainActor.run { self.model?.currentDailyLog() } ?? DailyLogEntry(
+                        day: "", completed: 0, focusMinutes: 0, internalBreaks: 0, externalBreaks: 0, voided: 0, taskSummary: ""
+                    )
+                }
+                let finalResolved = resolved
+                await MainActor.run {
+                    if Self.logCacheKey(for: self.config) == Self.logCacheKey(for: cfg) {
+                        self.cachedLogSchema = (Self.logCacheKey(for: cfg), finalResolved.schema, finalResolved.useDataSource)
+                        self.logDatabaseTitle = finalResolved.schema.databaseTitle
+                    }
+                    self.lastLogSync = Date()
+                    self.lastLogError = nil
+                    self.logSyncing = false
+                    completion?(.success(finalEntry))
+                }
+            } catch {
+                await MainActor.run {
+                    self.lastLogError = error.localizedDescription
+                    self.logSyncing = false
+                    completion?(.failure(error))
+                }
+            }
+        }
+    }
+
+    private func flushPendingLogs(syncTodayIfActive: Bool = false) {
+        guard config.isLogConfigured else { return }
+        let hasPending = !(model?.pendingDailyLogs().isEmpty ?? true)
+        let todayActive = syncTodayIfActive && (model?.stats.hasActivity == true)
+        guard hasPending || todayActive else { return }
+        syncDailyLogNow(includeToday: todayActive)
+    }
+
+    private func syncFocusCompleted(_ entry: DailyLogEntry) {
+        guard config.isLogConfigured else { return }
+        if logSyncing {
+            model?.enqueueDailyLog(entry)
+            return
+        }
+        syncDailyLogNow(includeToday: true)
+    }
+
+    private func upsertDailyLog(
+        _ entry: DailyLogEntry, using cfg: NotionConfig,
+        resolved: (schema: NotionLogSchema, useDataSource: Bool)
+    ) async throws -> (schema: NotionLogSchema, useDataSource: Bool) {
+        let s = resolved.schema
+        let dsID = cfg.trimmedLogDataSourceID
+        let dbID = !cfg.trimmedLogDatabaseID.isEmpty ? cfg.trimmedLogDatabaseID : dsID
+
+        var queryBody: [String: Any] = ["page_size": 1]
+        if let dateProp = s.dateProp {
+            queryBody["filter"] = ["property": dateProp, "date": ["equals": entry.day]]
+        } else if let titleProp = s.titleProp {
+            queryBody["filter"] = ["property": titleProp, "title": ["equals": entry.day]]
+        } else {
+            throw SyncError.http(400, "每日记录数据库缺少日期或标题列")
+        }
+
+        let queryResult = try await postQuery(dsID: dsID, dbID: dbID, useDataSource: resolved.useDataSource,
+                                              token: cfg.trimmedToken, body: queryBody)
+        let existingID = ((queryResult["results"] as? [[String: Any]])?.first)?["id"] as? String
+
+        var props: [String: Any] = [:]
+        if let p = s.titleProp { props[p] = ["title": [["text": ["content": entry.day]]]] }
+        if let p = s.dateProp { props[p] = ["date": ["start": entry.day]] }
+        if let p = s.completedProp { props[p] = ["number": entry.completed] }
+        if let p = s.focusMinutesProp { props[p] = ["number": entry.focusMinutes] }
+        if let p = s.internalProp { props[p] = ["number": entry.internalBreaks] }
+        if let p = s.externalProp { props[p] = ["number": entry.externalBreaks] }
+        if let p = s.voidedProp { props[p] = ["number": entry.voided] }
+        if let p = s.tasksProp {
+            let trimmed = String(entry.taskSummary.prefix(1900))
+            props[p] = ["rich_text": trimmed.isEmpty ? [] : [["text": ["content": trimmed]]]]
+        }
+
+        if let pageID = existingID {
+            let body = try JSONSerialization.data(withJSONObject: ["properties": props])
+            _ = try await request(method: "PATCH", path: "pages/\(pageID)",
+                                  version: "2022-06-28", token: cfg.trimmedToken, body: body)
+        } else if resolved.useDataSource && !dsID.isEmpty {
+            do {
+                let payload = try JSONSerialization.data(withJSONObject: [
+                    "parent": ["type": "data_source_id", "data_source_id": dsID],
+                    "properties": props,
+                ])
+                _ = try await request(method: "POST", path: "pages",
+                                      version: "2025-09-03", token: cfg.trimmedToken, body: payload)
+            } catch SyncError.http(let code, _) where (code == 400 || code == 404) && !dbID.isEmpty {
+                let payload = try JSONSerialization.data(withJSONObject: [
+                    "parent": ["database_id": dbID],
+                    "properties": props,
+                ])
+                _ = try await request(method: "POST", path: "pages",
+                                      version: "2022-06-28", token: cfg.trimmedToken, body: payload)
+            }
+        } else {
+            let payload = try JSONSerialization.data(withJSONObject: [
+                "parent": ["database_id": dbID],
+                "properties": props,
+            ])
+            _ = try await request(method: "POST", path: "pages",
+                                  version: "2022-06-28", token: cfg.trimmedToken, body: payload)
+        }
+        return resolved
+    }
+
+    // MARK: 回写任务完成状态
 
     private func taskFinished(_ task: TaskItem) {
         let cfg = config
@@ -575,10 +894,11 @@ final class NotionSync: ObservableObject {
     }
 
     enum SyncError: LocalizedError {
-        case notConfigured, busy, http(Int, String)
+        case notConfigured, logNotConfigured, busy, http(Int, String)
         var errorDescription: String? {
             switch self {
             case .notConfigured: return "还没有填写 Notion 令牌和数据库 ID"
+            case .logNotConfigured: return "还没有填写 Notion 令牌和每日记录数据库 ID"
             case .busy: return "正在同步中"
             case .http(let code, let msg):
                 if code == 401 { return "令牌无效（401）" }

@@ -434,14 +434,20 @@ private struct TimerSettings: View {
 private struct SyncSettings: View {
     @ObservedObject private var sync = NotionSync.shared
     @ObservedObject private var api = APIServer.shared
+    @State private var syncTab = 0
     @State private var token = ""
     @State private var target = ""
+    @State private var excludedText = ""
+    @State private var logTarget = ""
+    @State private var editingLogToken = false
     @State private var copied = false
     @Environment(\.theme) private var t
 
     private var dbLabel: String { sync.databaseTitle ?? "Notion 数据库" }
+    private var logDbLabel: String { sync.logDatabaseTitle ?? "Notion 每日记录" }
     private var trimmedToken: String { token.trimmingCharacters(in: .whitespacesAndNewlines) }
     private var trimmedTarget: String { target.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var trimmedLogTarget: String { logTarget.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     private var notionStatus: (String, Color, String) {
         if !sync.config.isConfigured { return ("未连接", t.faint, "填写 integration 令牌和数据库链接或 ID") }
@@ -451,76 +457,149 @@ private struct SyncSettings: View {
         return ("已连接 · \(dbLabel)", t.positive, "等待首次同步")
     }
 
+    private var logStatus: (String, Color, String) {
+        if !sync.config.isLogConfigured { return ("未配置", t.faint, "填写每日记录数据库（如 Pomodoro Log）链接或 ID") }
+        if sync.logSyncing { return ("同步中…", t.warning, "正在写入 \(logDbLabel)") }
+        if let e = sync.lastLogError { return ("同步失败", t.accent(.focus), e) }
+        if let d = sync.lastLogSync { return ("已连接 · \(logDbLabel)", t.positive, "上次同步 \(Fmt.hm.string(from: d))") }
+        return ("已连接 · \(logDbLabel)", t.positive, "等待同步")
+    }
+
     private var dirty: Bool {
-        trimmedToken != sync.config.trimmedToken || trimmedTarget != sync.config.targetInput
+        trimmedToken != sync.config.trimmedToken
+            || trimmedTarget != sync.config.targetInput
+            || NotionConfig.parseCategories(excludedText) != sync.config.excludedCategories
+    }
+
+    private var logDirty: Bool {
+        trimmedToken != sync.config.trimmedToken || trimmedLogTarget != sync.config.logTargetInput
     }
 
     var body: some View {
         let s = notionStatus
+        let ls = logStatus
         VStack(alignment: .leading, spacing: 0) {
-            SettingGroup(title: "Notion") {
-                StatusDot(text: s.0, color: s.1, detail: s.2)
-                    .padding(.vertical, 8)
-                Text("范围：今天计划、\(sync.config.lookaheadDays) 天内到期、已逾期、置顶的未完成任务；启动时和每 30 分钟同步。")
-                    .font(Typo.text(11))
-                    .foregroundColor(t.gray)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.bottom, 4)
-                InkField(label: "Integration 令牌", placeholder: "ntn_… 或 secret_…", text: $token, secure: true)
-                InkField(label: "数据库链接或 ID", placeholder: "粘贴 Notion 数据库链接或 ID", text: $target, mono: true)
-                SettingRow(title: "DDL 提前天数", detail: "拉取未来几天内到期的任务") {
-                    InkStepper(value: Binding(get: { sync.config.lookaheadDays },
-                                              set: { v in sync.update { $0.lookaheadDays = v } }),
-                               range: 1...30, unit: "天")
-                }
-                SettingRow(title: "完成时回写 Notion", detail: "在番茄钟里勾选完成时同步更新 Notion 状态", divider: false) {
-                    InkSwitch(isOn: Binding(get: { sync.config.writeBack },
-                                            set: { v in sync.update { $0.writeBack = v } }))
-                }
-                HStack(spacing: 8) {
-                    InkButton(title: dirty ? "保存并同步" : "立即同步", icon: "arrow.triangle.2.circlepath") {
-                        sync.update {
-                            $0.token = trimmedToken
-                            if trimmedTarget != $0.targetInput {
-                                let extracted = NotionSync.extractID(from: trimmedTarget)
-                                $0.dataSourceID = extracted
-                                $0.databaseID = extracted
-                            }
-                        }
-                        target = sync.config.targetInput
-                        if sync.config.isConfigured { sync.sync() }
+            Rectangle().fill(t.line).frame(height: 1).padding(.top, 10)
+            CapsuleTabs(items: [(0, "任务同步"), (1, "每日记录"), (2, "AI 接口")],
+                        selection: $syncTab, fontSize: 11.5)
+                .padding(.leading, -10)
+                .padding(.top, 10)
+
+            switch syncTab {
+            case 0:
+                SettingGroup(title: "Notion 任务同步") {
+                    StatusDot(text: s.0, color: s.1, detail: s.2)
+                        .padding(.vertical, 8)
+                    Text("范围：今天计划、\(sync.config.lookaheadDays) 天内到期、已逾期、置顶的未完成任务；启动时和每 30 分钟同步。")
+                        .font(Typo.text(11))
+                        .foregroundColor(t.gray)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.bottom, 4)
+                    InkField(label: "Integration 令牌", placeholder: "ntn_… 或 secret_…", text: $token, secure: true)
+                    InkField(label: "任务数据库链接或 ID", placeholder: "粘贴任务数据库链接或 ID", text: $target, mono: true)
+                    InkField(label: "排除分类（逗号分隔）", placeholder: "如 Event, 活动, 会议", text: $excludedText)
+                    SettingRow(title: "DDL 提前天数", detail: "拉取未来几天内到期的任务") {
+                        InkStepper(value: Binding(get: { sync.config.lookaheadDays },
+                                                  set: { v in sync.update { $0.lookaheadDays = v } }),
+                                   range: 1...30, unit: "天")
                     }
-                    .disabled(trimmedToken.isEmpty || trimmedTarget.isEmpty || sync.syncing)
+                    SettingRow(title: "完成时回写 Notion", detail: "在番茄钟里勾选完成时同步更新 Notion 状态", divider: false) {
+                        InkSwitch(isOn: Binding(get: { sync.config.writeBack },
+                                                set: { v in sync.update { $0.writeBack = v } }))
+                    }
+                    HStack(spacing: 8) {
+                        InkButton(title: dirty ? "保存并同步" : "立即同步", icon: "arrow.triangle.2.circlepath") {
+                            sync.update {
+                                $0.token = trimmedToken
+                                if trimmedTarget != $0.targetInput {
+                                    let extracted = NotionSync.extractID(from: trimmedTarget)
+                                    $0.dataSourceID = extracted
+                                    $0.databaseID = extracted
+                                }
+                                $0.excludedCategories = NotionConfig.parseCategories(excludedText)
+                            }
+                            target = sync.config.targetInput
+                            excludedText = sync.config.excludedCategoriesText
+                            if sync.config.isConfigured { sync.sync() }
+                        }
+                        .disabled(trimmedToken.isEmpty || trimmedTarget.isEmpty || sync.syncing)
+                    }
+                    .padding(.top, 8)
                 }
-                .padding(.top, 8)
-            }
-            Rectangle().fill(t.line).frame(height: 1).padding(.top, 18)
-            SettingGroup(title: "AI 接口") {
-                StatusDot(text: api.running ? "已开启" : "未启动",
-                          color: api.running ? t.positive : t.accent(.focus),
-                          detail: api.running ? "只在本机 127.0.0.1:\(api.config.port) 监听，需令牌访问" : api.lastError)
-                    .padding(.vertical, 8)
-                HStack(spacing: 6) {
-                    KeyChip(text: "pomo status", mono: true)
-                    KeyChip(text: "pomo tasks", mono: true)
-                    KeyChip(text: "pomo add", mono: true)
+            case 1:
+                SettingGroup(title: "每日记录同步") {
+                    StatusDot(text: ls.0, color: ls.1, detail: ls.2)
+                        .padding(.vertical, 8)
+                    Text("跨天或次日打开自动归档昨天统计，完成番茄时实时更新当天记录；按日期去重。")
+                        .font(Typo.text(11))
+                        .foregroundColor(t.gray)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.bottom, 4)
+                    if trimmedToken.isEmpty || editingLogToken {
+                        InkField(label: "Integration 令牌", placeholder: "ntn_… 或 secret_…", text: $token, secure: true)
+                    } else {
+                        HStack {
+                            Text("已共用 Notion Integration 令牌")
+                                .font(Typo.text(11))
+                                .foregroundColor(t.gray)
+                            Spacer()
+                            Button("更换令牌") { editingLogToken = true }
+                                .buttonStyle(.plain)
+                                .font(Typo.text(11, .medium))
+                                .foregroundColor(t.ink)
+                        }
+                        .padding(.vertical, 6)
+                    }
+                    InkField(label: "每日记录数据库链接或 ID", placeholder: "粘贴 Pomodoro Log 链接或 ID（留空关闭）", text: $logTarget, mono: true)
+                    HStack(spacing: 8) {
+                        InkButton(title: logDirty ? "保存记录库" : "立即同步今日", icon: "calendar.badge.clock") {
+                            sync.update {
+                                $0.token = trimmedToken
+                                if trimmedLogTarget != $0.logTargetInput {
+                                    let extracted = NotionSync.extractID(from: trimmedLogTarget)
+                                    $0.logDataSourceID = extracted
+                                    $0.logDatabaseID = extracted
+                                }
+                            }
+                            logTarget = sync.config.logTargetInput
+                            editingLogToken = false
+                            if sync.config.isLogConfigured { sync.syncDailyLogNow(includeToday: true) }
+                        }
+                        .disabled(sync.logSyncing || (trimmedToken.isEmpty && !trimmedLogTarget.isEmpty) || (!logDirty && !sync.config.isLogConfigured))
+                    }
+                    .padding(.top, 8)
                 }
-                .padding(.vertical, 4)
-                Text("AI 用命令行 pomo 即可调用，说明见 docs/API.md")
-                    .font(Typo.text(11))
-                    .foregroundColor(t.gray)
+            default:
+                SettingGroup(title: "AI 接口") {
+                    StatusDot(text: api.running ? "已开启" : "未启动",
+                              color: api.running ? t.positive : t.accent(.focus),
+                              detail: api.running ? "只在本机 127.0.0.1:\(api.config.port) 监听，需令牌访问" : api.lastError)
+                        .padding(.vertical, 8)
+                    HStack(spacing: 6) {
+                        KeyChip(text: "pomo status", mono: true)
+                        KeyChip(text: "pomo tasks", mono: true)
+                        KeyChip(text: "pomo log-today", mono: true)
+                    }
                     .padding(.vertical, 4)
-                InkButton(title: copied ? "已复制" : "复制接口令牌", icon: copied ? "checkmark" : "doc.on.doc", filled: false) {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(api.config.token, forType: .string)
-                    copied = true
+                    Text("AI 用命令行 pomo 即可调用，说明见 docs/API.md")
+                        .font(Typo.text(11))
+                        .foregroundColor(t.gray)
+                        .padding(.vertical, 4)
+                    InkButton(title: copied ? "已复制" : "复制接口令牌", icon: copied ? "checkmark" : "doc.on.doc", filled: false) {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(api.config.token, forType: .string)
+                        copied = true
+                    }
+                    .padding(.top, 6)
                 }
-                .padding(.top, 6)
             }
         }
         .onAppear {
             token = sync.config.token
             target = sync.config.targetInput
+            excludedText = sync.config.excludedCategoriesText
+            logTarget = sync.config.logTargetInput
+            editingLogToken = false
         }
     }
 }

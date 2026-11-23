@@ -336,6 +336,25 @@ class APIServer {
       }
     }
 
+    if (method === "POST" && rest[0] === "notion" && rest[1] === "log-today" && rest.length === 2) {
+      if (!this.notion) return this._send(res, 500, { ok: false, error: "Notion 同步未就绪" });
+      try {
+        const entry = await this.notion.syncDailyLogNow(true);
+        return this._send(res, 200, {
+          ok: true,
+          day: entry.day,
+          completed: entry.completed,
+          focusMinutes: entry.focusMinutes,
+          internalInterruptions: entry.internalBreaks,
+          externalInterruptions: entry.externalBreaks,
+          voided: entry.voided,
+          tasks: entry.taskSummary,
+        });
+      } catch (err) {
+        return this._send(res, 409, { ok: false, error: err?.message || String(err) });
+      }
+    }
+
     return this._send(res, 404, { error: "未知路径，见 docs/API.md" });
   }
 }

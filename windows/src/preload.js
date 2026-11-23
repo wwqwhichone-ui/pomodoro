@@ -33,7 +33,9 @@ contextBridge.exposeInMainWorld("pomo", {
   updateSettings: (patch) => ipcRenderer.invoke("pomo:settings-update", patch),
 
   saveAndSyncNotion: (payload) => ipcRenderer.invoke("pomo:notion-save-sync", payload),
+  saveAndSyncLog: (payload) => ipcRenderer.invoke("pomo:notion-log-save-sync", payload),
   syncNotion: () => ipcRenderer.invoke("pomo:notion-sync"),
+  syncDailyLogNow: () => ipcRenderer.invoke("pomo:notion-log-now"),
   updateNotionConfig: (patch) => ipcRenderer.invoke("pomo:notion-update", patch),
 
   copyApiToken: () => ipcRenderer.invoke("pomo:api-copy-token"),

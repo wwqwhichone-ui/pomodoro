@@ -491,7 +491,9 @@ struct TaskListView: View {
                                 onSelect: { model.selectTask(task.id) },
                                 onToggle: { model.toggleFinished(task.id) },
                                 onDelete: { model.removeTask(task.id) },
-                                onEstimate: { model.adjustEstimate(task.id, by: $0) })
+                                onEstimate: { model.adjustEstimate(task.id, by: $0) },
+                                onTop3: { model.toggleTop3(task.id) },
+                                onPriority: { model.cyclePriority(task.id) })
                     }
                     if model.tasks.isEmpty {
                         Text("先列出今天要做的事，\n再预估每件要几个番茄。")
@@ -542,6 +544,8 @@ struct TaskRow: View {
     let onToggle: () -> Void
     let onDelete: () -> Void
     let onEstimate: (Int) -> Void
+    var onTop3: (() -> Void)? = nil
+    var onPriority: (() -> Void)? = nil
     @AppStorage(Key.focusMin) private var focusMin = 25
     @State private var hover = false
     @State private var expandedFinished = false
@@ -636,9 +640,9 @@ struct TaskRow: View {
         .help(task.finished ? (expandedFinished ? "点击收起完整名称" : "点击查看完整名称") : (isCurrent ? "当前任务" : "点击设为当前任务，可查看完整名称与调整预估"))
     }
 
-    /// 预估 − 4 +   ·   Notion ↗（本地任务为「删除」）
+    /// 预估 − 4 + · 重点 · 优先级 · Notion ↗（本地任务为「删除」）
     private var actionBar: some View {
-        HStack(spacing: 10 * s) {
+        HStack(spacing: 8 * s) {
             HStack(spacing: 5 * s) {
                 Text("预估")
                     .font(Typo.text(11 * s, .medium))
@@ -655,6 +659,15 @@ struct TaskRow: View {
                 smallButton("plus", help: "预估多 1 个番茄") { onEstimate(1) }
             }
             .help("预估这件事要几个番茄（当前每个 \(focusMin) 分钟）")
+            if let onTop3 {
+                chip(task.isTop3 ? "★ 重点" : "重点", active: task.isTop3,
+                     help: task.isTop3 ? "取消今日重点" : "设为今日重点（排序置顶）") { onTop3() }
+            }
+            if let onPriority {
+                let pTitle = task.priority.map { "P\($0)" } ?? "优先级"
+                chip(pTitle, active: task.priority != nil,
+                     help: "点击切换优先级（P1 → P2 → P3 → P0 → 无）") { onPriority() }
+            }
             if let url = task.notionURL.flatMap(URL.init(string:)) {
                 chip("Notion ↗", help: "在浏览器里打开这条任务的 Notion 页面") { NSWorkspace.shared.open(url) }
             } else {
@@ -663,14 +676,15 @@ struct TaskRow: View {
         }
     }
 
-    private func chip(_ title: String, help: String, action: @escaping () -> Void) -> some View {
+    private func chip(_ title: String, active: Bool = false, help: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(title)
                 .font(Typo.text(11 * s, .semibold))
                 .foregroundColor(t.ink)
                 .padding(.horizontal, 9 * s)
                 .frame(height: 22 * s)
-                .overlay(Capsule().strokeBorder(t.ink.opacity(0.3), lineWidth: 1))
+                .background(Capsule().fill(active ? t.ink.opacity(0.06) : Color.clear))
+                .overlay(Capsule().strokeBorder(t.ink.opacity(active ? 0.85 : 0.3), lineWidth: 1))
                 .contentShape(Capsule())
         }
         .buttonStyle(PressStyle())

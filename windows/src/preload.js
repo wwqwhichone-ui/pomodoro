@@ -28,6 +28,9 @@ contextBridge.exposeInMainWorld("pomo", {
   toggleFinished: (id) => ipcRenderer.invoke("pomo:task-toggle", id),
   removeTask: (id) => ipcRenderer.invoke("pomo:task-remove", id),
   adjustEstimate: (id, delta) => ipcRenderer.invoke("pomo:task-estimate", { id, delta }),
+  toggleTop3: (id) => ipcRenderer.invoke("pomo:task-top3", id),
+  cyclePriority: (id) => ipcRenderer.invoke("pomo:task-priority", id),
+  renameTask: (id, title) => ipcRenderer.invoke("pomo:task-rename", { id, title }),
   clearFinished: () => ipcRenderer.invoke("pomo:task-clear-finished"),
 
   updateSettings: (patch) => ipcRenderer.invoke("pomo:settings-update", patch),

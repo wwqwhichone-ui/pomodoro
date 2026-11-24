@@ -46,6 +46,8 @@ const DEFAULT_SETTINGS = {
   autoFullScreenOnSecondary: true,
   appearance: "light",
   showInTray: true,
+  desktopNotifications: true,
+  closeToTray: false,
 };
 
 function pad2(n) {
@@ -134,6 +136,8 @@ function parseQuickAdd(raw) {
   let estimate = 1;
   let priority = null;
   let due = null;
+  let top3 = false;
+  let tag = null;
   let changed = true;
   while (changed) {
     changed = false;
@@ -161,8 +165,20 @@ function parseQuickAdd(raw) {
         changed = true;
       }
     }
+    const top3Match = title.match(/(^|\s+)(?:!|★|#top3)$/i);
+    if (top3Match) {
+      top3 = true;
+      title = title.slice(0, top3Match.index).trim();
+      changed = true;
+    }
+    const tagMatch = title.match(/(^|\s+)#([^\s#@!★×xX*]+)$/);
+    if (tagMatch && tagMatch[2].toLowerCase() !== "top3") {
+      tag = tagMatch[2];
+      title = title.slice(0, tagMatch.index).trim();
+      changed = true;
+    }
   }
-  return { title, estimate, priority, due };
+  return { title, estimate, priority, due, top3, tag };
 }
 
 function getDueMoment(task) {
@@ -246,6 +262,16 @@ class TimerModel extends EventEmitter {
     this.pendingDailyLogs = Array.isArray(saved.pendingDailyLogs)
       ? saved.pendingDailyLogs.map((x) => ({ ...x }))
       : [];
+    this.history = Array.isArray(saved.history)
+      ? saved.history.map((x) => ({ ...x }))
+      : [];
+    this.windowBounds =
+      saved.windowBounds &&
+      typeof saved.windowBounds === "object" &&
+      Number.isFinite(saved.windowBounds.width) &&
+      Number.isFinite(saved.windowBounds.height)
+        ? { ...saved.windowBounds }
+        : null;
 
     const today = localDayString();
     let rolledOver = false;
@@ -254,7 +280,9 @@ class TimerModel extends EventEmitter {
         this.stats = { ...makeEmptyStats(today), ...saved.stats };
       } else {
         if (hasStatsActivity(saved.stats)) {
-          this._enqueueDailyLogInMemory(makeDailyLog(saved.stats));
+          const oldEntry = makeDailyLog(saved.stats);
+          this._enqueueDailyLogInMemory(oldEntry);
+          this._upsertHistoryInMemory(oldEntry);
         }
         this.stats = makeEmptyStats(today);
         rolledOver = true;
@@ -296,19 +324,135 @@ class TimerModel extends EventEmitter {
     this.settings.alwaysOnTop = Boolean(this.settings.alwaysOnTop);
     this.settings.autoFullScreenOnSecondary = this.settings.autoFullScreenOnSecondary !== false;
     this.settings.showInTray = this.settings.showInTray !== false;
+    this.settings.desktopNotifications = this.settings.desktopNotifications !== false;
+    this.settings.closeToTray = Boolean(this.settings.closeToTray);
     if (!["light", "dark", "system"].includes(this.settings.appearance)) {
       this.settings.appearance = "light";
     }
   }
 
   _save() {
+    this._syncTodayToHistoryInMemory();
     writeJSON(this.stateFile, {
       settings: this.settings,
       tasks: this.tasks,
       currentTaskID: this.currentTaskID,
       stats: this.stats,
       pendingDailyLogs: this.pendingDailyLogs,
+      history: this.history,
+      windowBounds: this.windowBounds,
     });
+  }
+
+  _upsertHistoryInMemory(entry) {
+    if (!entry || !entry.day) return;
+    this.history = (this.history || []).filter((x) => x.day !== entry.day);
+    const active =
+      (entry.completed || 0) > 0 ||
+      (entry.focusMinutes || 0) > 0 ||
+      (entry.internalBreaks || 0) > 0 ||
+      (entry.externalBreaks || 0) > 0 ||
+      (entry.voided || 0) > 0;
+    if (active) {
+      this.history.push({ ...entry });
+      this.history.sort((a, b) => a.day.localeCompare(b.day));
+      if (this.history.length > 60) {
+        this.history = this.history.slice(-60);
+      }
+    }
+  }
+
+  _syncTodayToHistoryInMemory() {
+    if (!this.stats || !this.stats.day) return;
+    if (hasStatsActivity(this.stats)) {
+      this._upsertHistoryInMemory(makeDailyLog(this.stats));
+    } else {
+      this.history = (this.history || []).filter((x) => x.day !== this.stats.day);
+    }
+  }
+
+  setWindowBounds(bounds) {
+    if (
+      !bounds ||
+      !Number.isFinite(bounds.x) ||
+      !Number.isFinite(bounds.y) ||
+      !Number.isFinite(bounds.width) ||
+      !Number.isFinite(bounds.height)
+    ) {
+      return;
+    }
+    this.windowBounds = {
+      x: Math.round(bounds.x),
+      y: Math.round(bounds.y),
+      width: Math.round(bounds.width),
+      height: Math.round(bounds.height),
+    };
+    this._save();
+  }
+
+  getRecentHistory(days = 7, now = new Date()) {
+    const count = Math.min(60, Math.max(1, Math.trunc(Number(days) || 7)));
+    const today0 = startOfLocalDay(now);
+    const todayStr = localDayString(today0);
+    const byDay = new Map();
+    for (const h of this.history || []) {
+      if (h && h.day) byDay.set(h.day, { ...h });
+    }
+    for (const p of this.pendingDailyLogs || []) {
+      if (p && p.day) byDay.set(p.day, { ...p });
+    }
+    if (this.stats && this.stats.day === todayStr) {
+      byDay.set(todayStr, makeDailyLog(this.stats));
+    }
+
+    const list = [];
+    let totalCompleted = 0;
+    let totalFocusMinutes = 0;
+    let totalInterruptions = 0;
+    let totalVoided = 0;
+    let activeDays = 0;
+
+    for (let i = count - 1; i >= 0; i--) {
+      const dt = new Date(today0.getFullYear(), today0.getMonth(), today0.getDate() - i);
+      const dayStr = localDayString(dt);
+      const found = byDay.get(dayStr);
+      const item = found
+        ? {
+            day: dayStr,
+            completed: found.completed || 0,
+            focusMinutes: found.focusMinutes || 0,
+            internalBreaks: found.internalBreaks || 0,
+            externalBreaks: found.externalBreaks || 0,
+            voided: found.voided || 0,
+            taskSummary: found.taskSummary || "",
+          }
+        : {
+            day: dayStr,
+            completed: 0,
+            focusMinutes: 0,
+            internalBreaks: 0,
+            externalBreaks: 0,
+            voided: 0,
+            taskSummary: "",
+          };
+      list.push(item);
+      totalCompleted += item.completed;
+      totalFocusMinutes += item.focusMinutes;
+      totalInterruptions += item.internalBreaks + item.externalBreaks;
+      totalVoided += item.voided;
+      if (item.completed > 0 || item.focusMinutes > 0) activeDays += 1;
+    }
+
+    return {
+      days: list,
+      summary: {
+        totalCompleted,
+        totalFocusMinutes,
+        totalInterruptions,
+        totalVoided,
+        activeDays,
+      },
+    };
   }
 
   _enqueueDailyLogInMemory(entry) {
@@ -516,7 +660,16 @@ class TimerModel extends EventEmitter {
     return this.addTask(parsed);
   }
 
-  addTask({ title, estimate = 1, priority = null, due = null, dueHasTime = false, top3 = false, note = null } = {}) {
+  addTask({
+    title,
+    estimate = 1,
+    priority = null,
+    due = null,
+    dueHasTime = false,
+    top3 = false,
+    note = null,
+    tag = null,
+  } = {}) {
     const cleanTitle = String(title || "").trim();
     if (!cleanTitle) return null;
     const t = {
@@ -540,6 +693,9 @@ class TimerModel extends EventEmitter {
     }
     if (top3) t.top3 = true;
     if (note !== null && note !== undefined) t.note = String(note);
+    if (tag !== null && tag !== undefined && String(tag).trim()) {
+      t.tag = String(tag).trim();
+    }
 
     this.tasks.push(t);
     const cur = this.currentTask;
@@ -547,6 +703,33 @@ class TimerModel extends EventEmitter {
     this._save();
     this._emitChange();
     return this.tasks.find((x) => x.id === t.id) || null;
+  }
+
+  toggleTop3(id) {
+    const idx = this.tasks.findIndex((t) => t.id === id);
+    if (idx === -1) return null;
+    if (this.tasks[idx].top3) {
+      delete this.tasks[idx].top3;
+    } else {
+      this.tasks[idx].top3 = true;
+    }
+    this._save();
+    this._emitChange();
+    return this.tasks[idx];
+  }
+
+  cyclePriority(id) {
+    const idx = this.tasks.findIndex((t) => t.id === id);
+    if (idx === -1) return null;
+    const cur = this.tasks[idx].priority;
+    const order = [null, 1, 2, 3, 0];
+    const pos = order.indexOf(cur === undefined ? null : cur);
+    const next = order[(pos + 1) % order.length];
+    if (next === null) delete this.tasks[idx].priority;
+    else this.tasks[idx].priority = next;
+    this._save();
+    this._emitChange();
+    return this.tasks[idx];
   }
 
   updateTask(id, updater) {
@@ -679,7 +862,9 @@ class TimerModel extends EventEmitter {
       const old = this.stats;
       const active = hasStatsActivity(old);
       if (active) {
-        this._enqueueDailyLogInMemory(makeDailyLog(old));
+        const oldEntry = makeDailyLog(old);
+        this._enqueueDailyLogInMemory(oldEntry);
+        this._upsertHistoryInMemory(oldEntry);
       }
       this.stats = makeEmptyStats(today);
       this.tasks = this.tasks.filter((t) => !t.finished);
@@ -826,6 +1011,7 @@ class TimerModel extends EventEmitter {
         voided: this.stats.voided,
         internalInterruptions: this.stats.internalBreaks,
         externalInterruptions: this.stats.externalBreaks,
+        taskPomodoros: { ...(this.stats.taskPomodoros || {}) },
       },
       session: {
         internal: this.sessionInternal,
@@ -856,6 +1042,7 @@ class TimerModel extends EventEmitter {
       sessionInternal: this.sessionInternal,
       sessionExternal: this.sessionExternal,
       stats: { ...this.stats },
+      recentHistory: this.getRecentHistory(7),
       settings: { ...this.settings },
       currentTaskID: this.currentTaskID,
       tasks: this.sortedTasks.map((t) => ({

@@ -692,3 +692,115 @@ test("NotionLogSchema.detect (EN & ZH), cross-day pendingDailyLogs rollover, and
     rmDir(dir);
   }
 });
+
+test("Quick-add tags & top3, inline priority/top3 actions, 7-day history, windowBounds, and CLI history/clear-done", async () => {
+  const dir = makeTmpDir();
+  const model = new TimerModel({ dataDir: dir });
+  const server = new APIServer({ dataDir: dir, model });
+  try {
+    const p1 = parseQuickAdd("读论文 #Robotics ×3 P1 @明天 !");
+    assert.equal(p1.title, "读论文");
+    assert.equal(p1.tag, "Robotics");
+    assert.equal(p1.estimate, 3);
+    assert.equal(p1.priority, 1);
+    assert.equal(p1.top3, true);
+
+    const p2 = parseQuickAdd("写实验报告 ★ #课程");
+    assert.equal(p2.title, "写实验报告");
+    assert.equal(p2.top3, true);
+    assert.equal(p2.tag, "课程");
+
+    const t = model.addQuickTask("整理数据 #AI ×2 !");
+    assert.equal(t.title, "整理数据");
+    assert.equal(t.tag, "AI");
+    assert.equal(t.top3, true);
+    assert.equal(t.priority, undefined);
+
+    model.toggleTop3(t.id);
+    assert.equal(Boolean(model.tasks[0].top3), false);
+    model.toggleTop3(t.id);
+    assert.equal(Boolean(model.tasks[0].top3), true);
+
+    // Cycle priority: null -> 1 -> 2 -> 3 -> 0 -> null
+    model.cyclePriority(t.id);
+    assert.equal(model.tasks[0].priority, 1);
+    model.cyclePriority(t.id);
+    assert.equal(model.tasks[0].priority, 2);
+    model.cyclePriority(t.id);
+    assert.equal(model.tasks[0].priority, 3);
+    model.cyclePriority(t.id);
+    assert.equal(model.tasks[0].priority, 0);
+    model.cyclePriority(t.id);
+    assert.equal(model.tasks[0].priority, undefined);
+
+    // Window bounds persistence
+    model.setWindowBounds({ x: 120.4, y: 80.6, width: 480, height: 680 });
+    assert.deepEqual(model.windowBounds, { x: 120, y: 81, width: 480, height: 680 });
+
+    // Complete a pomodoro and check history
+    model.updateSettings({ focusMinutes: 25 });
+    model._advance(true);
+    const hist = model.getRecentHistory(7);
+    assert.equal(hist.days.length, 7);
+    assert.equal(hist.summary.totalCompleted, 1);
+    assert.equal(hist.summary.totalFocusMinutes, 25);
+    assert.equal(hist.summary.activeDays, 1);
+    assert.match(hist.days[6].taskSummary, /整理数据 \(1🍅\)/);
+
+    // Reopen model from disk to verify history & windowBounds persisted
+    const model2 = new TimerModel({ dataDir: dir });
+    assert.deepEqual(model2.windowBounds, { x: 120, y: 81, width: 480, height: 680 });
+    assert.equal(model2.getRecentHistory(7).summary.totalCompleted, 1);
+    model2.dispose();
+
+    // Test API endpoints: GET /v1/stats/history, POST /v1/tasks/clear-finished, tag in POST/PATCH
+    const port = await server.start(0);
+    const base = `http://127.0.0.1:${port}/v1`;
+    const authHeaders = {
+      Authorization: `Bearer ${server.config.token}`,
+      "Content-Type": "application/json",
+    };
+
+    const histRes = await fetch(`${base}/stats/history?days=7`, { headers: authHeaders });
+    assert.equal(histRes.status, 200);
+    const histJson = await histRes.json();
+    assert.equal(histJson.days.length, 7);
+    assert.equal(histJson.summary.totalCompleted, 1);
+
+    const py = getPythonCmd();
+    if (py) {
+      const pomoScript = path.resolve(__dirname, "..", "..", "tools", "pomo");
+      const env = { ...process.env, POMODORO_DATA_DIR: dir, POMODORO_PORT: String(port) };
+
+      const { stdout: addTagOut } = await execFileAsync(
+        py,
+        [pomoScript, "add", "阅读文献", "-g", "Paper", "--top3"],
+        { env, encoding: "utf8" }
+      );
+      assert.match(addTagOut, /Paper/);
+
+      const { stdout: histCliOut } = await execFileAsync(py, [pomoScript, "history", "-d", "7"], {
+        env,
+        encoding: "utf8",
+      });
+      assert.match(histCliOut, /近 7 天汇总：1 个番茄/);
+      assert.match(histCliOut, /整理数据/);
+
+      await execFileAsync(py, [pomoScript, "done", "1"], { env, encoding: "utf8" });
+      const { stdout: clearOut } = await execFileAsync(py, [pomoScript, "clear-done"], {
+        env,
+        encoding: "utf8",
+      });
+      assert.match(clearOut, /已清除已完成任务（剩余 1 条待办）/);
+    } else {
+      model.toggleFinished(t.id);
+      const clrRes = await fetch(`${base}/tasks/clear-finished`, { method: "POST", headers: authHeaders });
+      assert.equal(clrRes.status, 200);
+      assert.equal((await clrRes.json()).tasks.length, 0);
+    }
+  } finally {
+    await server.stop();
+    model.dispose();
+    rmDir(dir);
+  }
+});

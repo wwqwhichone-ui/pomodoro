@@ -8,3 +8,5 @@ build/
 # Windows / Electron 依赖与打包产物
 windows/node_modules/
 windows/dist/
+__pycache__/
+*.pyc

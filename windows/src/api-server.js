@@ -167,7 +167,8 @@ class APIServer {
 
   async _handle(req, res) {
     const method = (req.method || "GET").toUpperCase();
-    const rawUrl = (req.url || "/").split("?")[0];
+    const [rawUrl, rawQuery = ""] = (req.url || "/").split("?");
+    const searchParams = new URLSearchParams(rawQuery);
     const parts = rawUrl.split("/").filter(Boolean).map((s) => {
       try {
         return decodeURIComponent(s);
@@ -210,11 +211,20 @@ class APIServer {
         dueHasTime: dueCheck.value?.dueHasTime || false,
         top3: json.top3 === true,
         note: typeof json.note === "string" ? json.note : null,
+        tag: typeof json.tag === "string" ? json.tag : null,
       });
       if (!task) return this._send(res, 400, { error: "title 不能为空" });
       if (json.select === true) this.model.selectTask(task.id);
       const updated = this.model.tasks.find((t) => t.id === task.id) || task;
       return this._send(res, 201, this.model.taskDTO(updated));
+    }
+
+    if (method === "POST" && rest[0] === "tasks" && rest[1] === "clear-finished" && rest.length === 2) {
+      this.model.clearFinished();
+      return this._send(res, 200, {
+        ok: true,
+        tasks: this.model.sortedTasks.map((t) => this.model.taskDTO(t)),
+      });
     }
 
     if (rest[0] === "tasks" && (rest.length === 2 || rest.length === 3)) {
@@ -234,7 +244,7 @@ class APIServer {
           duePatch = dueCheck.value;
         }
         const updated = this.model.updateTask(task.id, (t) => {
-          if (typeof json.title === "string" && json.title) t.title = json.title;
+          if (typeof json.title === "string" && json.title.trim()) t.title = json.title.trim();
           if (typeof json.estimate === "number") t.estimate = json.estimate;
           if (Object.prototype.hasOwnProperty.call(json, "priority")) {
             const p = parsePriorityInput(json.priority);
@@ -255,6 +265,10 @@ class APIServer {
             else delete t.top3;
           }
           if (typeof json.note === "string") t.note = json.note;
+          if (Object.prototype.hasOwnProperty.call(json, "tag")) {
+            if (typeof json.tag === "string" && json.tag.trim()) t.tag = json.tag.trim();
+            else delete t.tag;
+          }
           if (typeof json.finished === "boolean") t.finished = json.finished;
         });
         return this._send(res, 200, this.model.taskDTO(updated || task));
@@ -315,6 +329,12 @@ class APIServer {
         this.model.logInterruption(kind !== "external");
       }
       return this._send(res, 200, this.model.getStatusDTO());
+    }
+
+    if (method === "GET" && rest[0] === "stats" && rest[1] === "history" && rest.length === 2) {
+      const daysParam = Number(searchParams.get("days") || 7);
+      const days = Number.isFinite(daysParam) ? Math.min(60, Math.max(1, Math.trunc(daysParam))) : 7;
+      return this._send(res, 200, this.model.getRecentHistory(days));
     }
 
     if (method === "POST" && rest[0] === "stats" && rest[1] === "reset" && rest.length === 2) {

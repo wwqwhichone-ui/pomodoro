@@ -7,16 +7,18 @@ AI（Claude Code、Codex 等）优先用命令行 **`pomo`**，它会自动读�
 
 ```bash
 pomo health                 # 检查本机接口是否在线（无需令牌）
-pomo status                 # 当前阶段 / 剩余时间 / 当前任务 / 今日统计
+pomo status                 # 当前阶段 / 剩余时间 / 当前任务 / 今日统计与任务明细
 pomo tasks                  # 今日待办（已排序，带序号和 id 前缀）
-pomo add "整理实验数据" -e 2 -p P1 -d 11-25 --select   # 添加并设为当前任务
+pomo add "整理实验数据" -e 2 -p P1 -d 11-25 -g 科研 --top3 --select   # 添加并设为当前任务
 pomo done 3                 # 按序号（或 id 前缀）标记完成
+pomo clear-done             # 清除所有已完成任务
 pomo select 2 && pomo start # 选任务并开始专注
 pomo pause | toggle | reset | skip
 pomo phase focus|short|long
 pomo interrupt internal|external [--undo]   # --undo 撤销误记的一次
+pomo history [-d 7]         # 查看近 N 天（默认 7 天）的专注统计与任务明细
 pomo reset-today            # 清零今日成果
-pomo edit 2 -p P0 -d 明天    # 改优先级 / DDL；-p none、-d none 清空
+pomo edit 2 -p P0 -d 明天 -g 论文   # 改优先级 / DDL / 标签；none 清空
 pomo sync                   # 立即同步 Notion 任务
 pomo log-today              # 立即同步今日番茄记录到 Notion
 pomo --json tasks           # 任何命令加 --json 输出原始 JSON
@@ -39,15 +41,17 @@ pomo --json tasks           # 任何命令加 --json 输出原始 JSON
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/v1/health` | 存活检查，不需要令牌 |
-| GET | `/v1/status` | 阶段、剩余秒数、`endsAt`、当前任务、今日统计 |
+| GET | `/v1/status` | 阶段、剩余秒数、`endsAt`、当前任务、今日统计（含 `taskPomodoros` 明细） |
 | GET | `/v1/tasks` | `{tasks: [...]}`，已按 Top 3 → 优先级 → DDL 排序 |
-| POST | `/v1/tasks` | 添加：`{title, estimate?, priority?, due?, top3?, note?, select?}` |
+| POST | `/v1/tasks` | 添加：`{title, estimate?, priority?, due?, top3?, tag?, note?, select?}` |
+| POST | `/v1/tasks/clear-finished` | 清除所有已完成任务，返回 `{ok, tasks}` |
 | GET / PATCH / DELETE | `/v1/tasks/{ref}` | 查看 / 修改（同上字段 + `finished`）/ 删除 |
 | POST | `/v1/tasks/{ref}/select` | 设为当前任务 |
 | POST | `/v1/tasks/{ref}/complete` | 标记完成（开启回写时同步到 Notion） |
 | POST | `/v1/timer/start` `pause` `toggle` `reset` `skip` | 计时控制，返回最新状态 |
 | POST | `/v1/timer/phase` | `{phase: "focus" \| "short" \| "long"}` |
 | POST | `/v1/interruptions` | `{kind: "internal" \| "external", undo?: true}`，仅专注阶段；`undo` 撤销本番茄内误记的一次 |
+| GET | `/v1/stats/history?days=7` | 近 N 天（1–60，默认 7）专注统计趋势与汇总 `{days, summary}` |
 | POST | `/v1/stats/reset` | 清零今日成果（番茄数、专注时长、打断、作废、本组进度） |
 | POST | `/v1/notion/sync` | 立即同步 Notion 任务，返回 `{ok, count, tasks}` |
 | POST | `/v1/notion/log-today` | 立即将今日（及未补传的历史跨天）番茄统计同步写入 Notion 每日记录库 |

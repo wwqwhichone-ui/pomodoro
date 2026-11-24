@@ -34,6 +34,7 @@ enum Key {
     static let currentTask = "currentTaskID"
     static let stats = "dayStats"
     static let pendingLogs = "pendingDailyLogs"
+    static let history = "dailyHistory"
     // 第一版遗留的键，仅用于迁移
     static let legacyTaskName = "taskName"
     static let legacyStatsDate = "statsDate"
@@ -220,7 +221,9 @@ final class TimerModel: ObservableObject {
         tasks = load([TaskItem].self, Key.tasks) ?? []
         if let old = expiredStats {
             if old.hasActivity {
-                enqueueDailyLog(Self.makeDailyLog(from: old))
+                let entry = Self.makeDailyLog(from: old)
+                enqueueDailyLog(entry)
+                upsertHistory(entry)
             }
             tasks.removeAll { $0.finished }
             saveStats()
@@ -367,12 +370,16 @@ final class TimerModel: ObservableObject {
     ///   ×3 / x3 / *3    预估 3 个番茄
     ///   P0 … P3          优先级
     ///   @今天 @明天 @11-25 @2026-11-25   DDL
+    ///   #标签            分类 / 标签
+    ///   ! 或 ★           今日重点（Top 3）
     @discardableResult
     func addTask(_ raw: String) -> TaskItem? {
         var title = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         var estimate = 1
         var priority: Int?
         var due: Date?
+        var top3 = false
+        var tag: String?
         var changed = true
         while changed {
             changed = false
@@ -394,14 +401,27 @@ final class TimerModel: ObservableObject {
                 title = String(title[..<r.lowerBound]).trimmingCharacters(in: .whitespaces)
                 changed = true
             }
+            if let r = title.range(of: #"(^|\s+)(!|★|#[Tt][Oo][Pp]3)$"#, options: .regularExpression) {
+                top3 = true
+                title = String(title[..<r.lowerBound]).trimmingCharacters(in: .whitespaces)
+                changed = true
+            }
+            if let r = title.range(of: #"(^|\s+)#[^\s#@!★×xX*]+$"#, options: .regularExpression) {
+                let token = String(title[r]).trimmingCharacters(in: .whitespaces).dropFirst()
+                if token.lowercased() != "top3" && !token.isEmpty {
+                    tag = String(token)
+                    title = String(title[..<r.lowerBound]).trimmingCharacters(in: .whitespaces)
+                    changed = true
+                }
+            }
         }
-        return addTask(title: title, estimate: estimate, priority: priority, due: due)
+        return addTask(title: title, estimate: estimate, priority: priority, due: due, top3: top3, tag: tag)
     }
 
     /// 结构化添加（AI 接口用）
     @discardableResult
     func addTask(title: String, estimate: Int = 1, priority: Int? = nil, due: Date? = nil,
-                 dueHasTime: Bool = false, top3: Bool = false, note: String? = nil) -> TaskItem? {
+                 dueHasTime: Bool = false, top3: Bool = false, note: String? = nil, tag: String? = nil) -> TaskItem? {
         let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty else { return nil }
         var t = TaskItem(title: title, estimate: min(12, max(1, estimate)))
@@ -410,6 +430,9 @@ final class TimerModel: ObservableObject {
         t.dueHasTime = due == nil ? nil : dueHasTime
         t.top3 = top3 ? true : nil
         t.note = note
+        if let cleanTag = tag?.trimmingCharacters(in: .whitespacesAndNewlines), !cleanTag.isEmpty {
+            t.tag = cleanTag
+        }
         tasks.append(t)
         if currentTask == nil || currentTask?.finished == true { autoSelect() }
         return tasks.first { $0.id == t.id }
@@ -440,6 +463,18 @@ final class TimerModel: ObservableObject {
     func adjustEstimate(_ id: UUID, by delta: Int) {
         guard let i = tasks.firstIndex(where: { $0.id == id }) else { return }
         tasks[i].estimate = min(12, max(1, tasks[i].estimate + delta))
+    }
+
+    func toggleTop3(_ id: UUID) {
+        guard let i = tasks.firstIndex(where: { $0.id == id }) else { return }
+        tasks[i].top3 = tasks[i].isTop3 ? nil : true
+    }
+
+    func cyclePriority(_ id: UUID) {
+        guard let i = tasks.firstIndex(where: { $0.id == id }) else { return }
+        let order: [Int?] = [nil, 1, 2, 3, 0]
+        let pos = order.firstIndex { $0 == tasks[i].priority } ?? 0
+        tasks[i].priority = order[(pos + 1) % order.count]
     }
 
     func clearFinished() {
@@ -561,6 +596,39 @@ final class TimerModel: ObservableObject {
         save(list, Key.pendingLogs)
     }
 
+    func historyLogs() -> [DailyLogEntry] {
+        load([DailyLogEntry].self, Key.history) ?? []
+    }
+
+    func upsertHistory(_ entry: DailyLogEntry) {
+        var list = historyLogs()
+        list.removeAll { $0.day == entry.day }
+        if entry.completed > 0 || entry.focusMinutes > 0 || entry.internalBreaks > 0 || entry.externalBreaks > 0 || entry.voided > 0 {
+            list.append(entry)
+            list.sort { $0.day < $1.day }
+            if list.count > 60 { list = Array(list.suffix(60)) }
+        }
+        save(list, Key.history)
+    }
+
+    func recentHistory(days: Int = 7, now: Date = Date()) -> [DailyLogEntry] {
+        let count = min(60, max(1, days))
+        let cal = Calendar.current
+        let today0 = cal.startOfDay(for: now)
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        let todayStr = f.string(from: today0)
+        var byDay: [String: DailyLogEntry] = [:]
+        for item in historyLogs() { byDay[item.day] = item }
+        for item in pendingDailyLogs() { byDay[item.day] = item }
+        if stats.day == todayStr { byDay[todayStr] = Self.makeDailyLog(from: stats) }
+        return (0..<count).reversed().map { offset in
+            let dt = cal.date(byAdding: .day, value: -offset, to: today0) ?? today0
+            let ds = f.string(from: dt)
+            return byDay[ds] ?? DailyLogEntry(day: ds, completed: 0, focusMinutes: 0, internalBreaks: 0, externalBreaks: 0, voided: 0, taskSummary: "")
+        }
+    }
+
     // MARK: 内部
 
     private func enter(_ p: Phase) {
@@ -645,7 +713,9 @@ final class TimerModel: ObservableObject {
         if stats.day != today {
             let old = stats
             if old.hasActivity {
-                enqueueDailyLog(Self.makeDailyLog(from: old))
+                let entry = Self.makeDailyLog(from: old)
+                enqueueDailyLog(entry)
+                upsertHistory(entry)
             }
             stats = DayStats(day: today)
             saveStats()
@@ -669,7 +739,10 @@ final class TimerModel: ObservableObject {
         return (s, nil)
     }
 
-    private func saveStats() { save(stats, Key.stats) }
+    private func saveStats() {
+        save(stats, Key.stats)
+        upsertHistory(Self.makeDailyLog(from: stats))
+    }
 
     private func save<T: Encodable>(_ value: T, _ key: String) {
         if let data = try? JSONEncoder().encode(value) { d.set(data, forKey: key) }

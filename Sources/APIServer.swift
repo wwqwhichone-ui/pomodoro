@@ -66,6 +66,7 @@ final class APIServer: ObservableObject {
     private struct Request {
         var method: String
         var path: [String]
+        var query: [String: String]
         var headers: [String: String]
         var body: Data
         var json: [String: Any] { ((try? JSONSerialization.jsonObject(with: body)) as? [String: Any]) ?? [:] }
@@ -114,9 +115,20 @@ final class APIServer: ObservableObject {
         let length = Int(headers["content-length"] ?? "0") ?? 0
         let body = buf[sep.upperBound...]
         guard body.count >= length else { return nil }
-        let rawPath = String(first[1]).split(separator: "?").first.map(String.init) ?? "/"
+        let urlParts = String(first[1]).split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
+        let rawPath = urlParts.first.map(String.init) ?? "/"
+        var query: [String: String] = [:]
+        if urlParts.count > 1 {
+            for pair in urlParts[1].split(separator: "&") {
+                let kv = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+                if let k = kv.first?.removingPercentEncoding {
+                    let v = kv.count > 1 ? (kv[1].removingPercentEncoding ?? String(kv[1])) : ""
+                    query[k] = v
+                }
+            }
+        }
         let path = rawPath.split(separator: "/").map { $0.removingPercentEncoding ?? String($0) }
-        return Request(method: String(first[0]).uppercased(), path: path, headers: headers,
+        return Request(method: String(first[0]).uppercased(), path: path, query: query, headers: headers,
                        body: Data(body.prefix(length)))
     }
 
@@ -160,13 +172,18 @@ final class APIServer: ObservableObject {
                                      priority: Self.priority(j["priority"]),
                                      due: due?.0, dueHasTime: due?.1 ?? false,
                                      top3: j["top3"] as? Bool ?? false,
-                                     note: j["note"] as? String)
+                                     note: j["note"] as? String,
+                                     tag: j["tag"] as? String)
             if let task {
                 if j["select"] as? Bool == true { model.selectTask(task.id) }
                 reply(201, Self.dto(task, model))
             } else {
                 reply(400, ["error": "title 不能为空"])
             }
+
+        case ("POST", "tasks", 2) where rest[1] == "clear-finished":
+            model.clearFinished()
+            reply(200, ["ok": true, "tasks": model.sortedTasks.map { Self.dto($0, model) }])
 
         case (_, "tasks", 2), (_, "tasks", 3):
             guard let task = Self.find(rest[1], in: model) else { return reply(404, ["error": "找不到任务 \(rest[1])"]) }
@@ -183,12 +200,21 @@ final class APIServer: ObservableObject {
                     due = dueCheck.value
                 }
                 model.updateTask(task.id) { t in
-                    if let v = j["title"] as? String, !v.isEmpty { t.title = v }
+                    if let v = j["title"] as? String, !v.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        t.title = v.trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
                     if let v = j["estimate"] as? Int { t.estimate = v }
                     if j.keys.contains("priority") { t.priority = Self.priority(j["priority"]) }
                     if j.keys.contains("due") { t.due = due?.0; t.dueHasTime = due.map { $0.1 } }
                     if let v = j["top3"] as? Bool { t.top3 = v ? true : nil }
                     if let v = j["note"] as? String { t.note = v }
+                    if j.keys.contains("tag") {
+                        if let v = j["tag"] as? String, !v.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            t.tag = v.trimmingCharacters(in: .whitespacesAndNewlines)
+                        } else {
+                            t.tag = nil
+                        }
+                    }
                     if let v = j["finished"] as? Bool { t.finished = v }
                 }
                 reply(200, Self.dto(model.tasks.first { $0.id == task.id } ?? task, model))
@@ -234,6 +260,41 @@ final class APIServer: ObservableObject {
                 model.logInterruption(internal: kind != "external")
             }
             reply(200, Self.status(model))
+
+        case ("GET", "stats", 2) where rest[1] == "history":
+            let days = Int(req.query["days"] ?? "7") ?? 7
+            let items = model.recentHistory(days: days)
+            var totalCompleted = 0
+            var totalFocusMinutes = 0
+            var totalInterruptions = 0
+            var totalVoided = 0
+            var activeDays = 0
+            let daysJson: [[String: Any]] = items.map { item in
+                totalCompleted += item.completed
+                totalFocusMinutes += item.focusMinutes
+                totalInterruptions += item.internalBreaks + item.externalBreaks
+                totalVoided += item.voided
+                if item.completed > 0 || item.focusMinutes > 0 { activeDays += 1 }
+                return [
+                    "day": item.day,
+                    "completed": item.completed,
+                    "focusMinutes": item.focusMinutes,
+                    "internalBreaks": item.internalBreaks,
+                    "externalBreaks": item.externalBreaks,
+                    "voided": item.voided,
+                    "taskSummary": item.taskSummary,
+                ]
+            }
+            reply(200, [
+                "days": daysJson,
+                "summary": [
+                    "totalCompleted": totalCompleted,
+                    "totalFocusMinutes": totalFocusMinutes,
+                    "totalInterruptions": totalInterruptions,
+                    "totalVoided": totalVoided,
+                    "activeDays": activeDays,
+                ],
+            ])
 
         case ("POST", "stats", 2) where rest[1] == "reset":
             model.resetToday()
@@ -302,6 +363,7 @@ final class APIServer: ObservableObject {
                 "voided": m.stats.voided,
                 "internalInterruptions": m.stats.internalBreaks,
                 "externalInterruptions": m.stats.externalBreaks,
+                "taskPomodoros": m.stats.taskPomodoros ?? [:],
             ],
             "session": ["internal": m.sessionInternal, "external": m.sessionExternal],
         ]

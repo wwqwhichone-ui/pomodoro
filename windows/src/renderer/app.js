@@ -345,6 +345,22 @@
     const st = state.timer.stats;
     const focusLabel = st.focusSeconds > 0 ? `专注 ${formatDuration(st.focusSeconds)}` : "还没开始";
     const focusColor = st.focusSeconds > 0 ? "var(--positive)" : "var(--gray)";
+    const taskEntries = Object.entries(st.taskPomodoros || {}).sort((a, b) =>
+      b[1] !== a[1] ? b[1] - a[1] : a[0].localeCompare(b[0])
+    );
+    let breakdownHTML = "";
+    if (taskEntries.length > 0) {
+      const topItems = taskEntries.slice(0, 3).map(
+        ([name, cnt]) =>
+          `<span class="today-task-chip" title="${esc(name)} · ${cnt} 个番茄" style="font-size:${11 * s}px;padding:${1.5 * s}px ${7 * s}px;"><span class="today-task-chip-name">${esc(name)}</span><span class="display-num" style="font-size:${12 * s}px;">×${cnt}</span></span>`
+      );
+      if (taskEntries.length > 3) {
+        topItems.push(
+          `<span style="font-size:${11 * s}px;color:var(--gray);">+${taskEntries.length - 3}</span>`
+        );
+      }
+      breakdownHTML = `<div class="today-breakdown-row" style="gap:${5 * s}px;margin-top:${6 * s}px;">${topItems.join("")}</div>`;
+    }
     return `
       <div>
         <div class="section-label" style="font-size:${12.5 * s}px;margin-bottom:${4 * s}px;">今日成果</div>
@@ -360,6 +376,7 @@
           ${st.interruptions > 0 || st.internalBreaks + st.externalBreaks > 0 ? `<span style="color:var(--gray);">打断 ${st.internalBreaks + st.externalBreaks}</span>` : ""}
           ${st.voided > 0 ? `<span style="color:var(--gray);">作废 ${st.voided}</span>` : ""}
         </div>
+        ${breakdownHTML}
       </div>`;
   }
 
@@ -486,6 +503,8 @@
         const showMetaEst =
           (task.priority === undefined || task.priority === null) && !task.due && !task.tag;
 
+        const prioLabel =
+          task.priority !== undefined && task.priority !== null ? `P${task.priority}` : "优先级";
         const actionBar =
           isCurrent && !task.finished
             ? `
@@ -496,6 +515,13 @@
                 <span class="display-num" style="font-size:${15 * s}px;min-width:${12 * s}px;text-align:center;">${task.estimate}</span>
                 <button class="small-circle-btn pressable" data-act="task-est" data-id="${task.id}" data-delta="1" ${task.estimate >= 12 ? "disabled" : ""} title="预估多 1 个番茄" style="width:${22 * s}px;height:${22 * s}px;">${svgIcon("plus", 10 * s)}</button>
               </div>
+              <button class="chip-btn pressable ${task.top3 ? "active" : ""}" data-act="task-top3" data-id="${task.id}" title="${task.top3 ? "取消今日重点" : "设为今日重点（排序置顶）"}" style="height:${22 * s}px;padding:0 ${8 * s}px;font-size:${11 * s}px;gap:${3 * s}px;">
+                ${svgIcon("star", 9.5 * s)}
+                <span>重点</span>
+              </button>
+              <button class="chip-btn pressable ${task.priority !== undefined && task.priority !== null ? "active" : ""}" data-act="task-prio" data-id="${task.id}" title="点击切换优先级（P1 → P2 → P3 → P0 → 无）" style="height:${22 * s}px;padding:0 ${8 * s}px;font-size:${11 * s}px;">
+                ${prioLabel}
+              </button>
               ${
                 task.notionURL
                   ? `<button class="chip-btn pressable" data-act="open-url" data-url="${esc(task.notionURL)}" title="在浏览器里打开这条任务的 Notion 页面" style="height:${22 * s}px;padding:0 ${9 * s}px;font-size:${11 * s}px;">Notion ↗</button>`
@@ -823,6 +849,45 @@
       </div>`;
   }
 
+  function renderHistory7dCard(historyObj) {
+    const days = Array.isArray(historyObj?.days) ? historyObj.days : [];
+    if (days.length === 0) return "";
+    const summary = historyObj.summary || {};
+    const maxCompleted = Math.max(4, ...days.map((d) => d.completed || 0));
+    const barsHTML = days
+      .map((d, idx) => {
+        const c = d.completed || 0;
+        const pct = c > 0 ? Math.max(12, Math.round((c / maxCompleted) * 100)) : 4;
+        const isToday = idx === days.length - 1;
+        const shortLabel = isToday ? "今" : (d.day || "").slice(5).replace("-", "/");
+        const tipParts = [`${d.day}：${c} 个番茄（${d.focusMinutes || 0} 分钟）`];
+        if ((d.internalBreaks || 0) + (d.externalBreaks || 0) > 0) {
+          tipParts.push(`打断 ${(d.internalBreaks || 0) + (d.externalBreaks || 0)}`);
+        }
+        if (d.taskSummary) tipParts.push(d.taskSummary);
+        return `
+          <div class="history-bar-col" title="${esc(tipParts.join(" · "))}">
+            <span class="display-num history-bar-num ${c > 0 ? "active" : ""}">${c > 0 ? c : ""}</span>
+            <div class="history-bar-track">
+              <div class="history-bar-fill ${isToday ? "today" : ""} ${c > 0 ? "has-val" : ""}" style="height:${pct}%;"></div>
+            </div>
+            <span class="history-bar-day ${isToday ? "today" : ""}">${esc(shortLabel)}</span>
+          </div>`;
+      })
+      .join("");
+
+    return `
+      <div class="history-7d-card">
+        <div class="history-7d-head">
+          <span class="setting-row-title">近 7 日专注趋势</span>
+          <span style="font-size:11px;color:var(--gray);font-weight:500;">共 ${summary.totalCompleted || 0} 🍅 · ${formatDuration((summary.totalFocusMinutes || 0) * 60)} · 活跃 ${summary.activeDays || 0} 天</span>
+        </div>
+        <div class="history-7d-bars">
+          ${barsHTML}
+        </div>
+      </div>`;
+  }
+
   function renderPopover() {
     if (!activePopover || !state) {
       popoverLayer.classList.add("hidden");
@@ -915,8 +980,16 @@
             ${sw("playSound", st.playSound)}
           </div>
           <div class="setting-row">
+            <div><div class="setting-row-title">阶段结束桌面通知</div><div class="setting-row-detail">每段结束时发送系统原生通知提醒</div></div>
+            ${sw("desktopNotifications", st.desktopNotifications !== false)}
+          </div>
+          <div class="setting-row">
             <div><div class="setting-row-title">系统托盘显示</div><div class="setting-row-detail">在托盘显示运行状态并提供快捷控制菜单</div></div>
             ${sw("showInTray", st.showInTray)}
+          </div>
+          <div class="setting-row">
+            <div><div class="setting-row-title">关闭按钮最小化到托盘</div><div class="setting-row-detail">点右上角关闭时不退出，留在系统托盘运行</div></div>
+            ${sw("closeToTray", Boolean(st.closeToTray))}
           </div>
           <div class="setting-row no-divider">
             <div><div class="setting-row-title">移到副屏自动全屏</div><div class="setting-row-detail">窗口移到外接显示器或无线副屏时自动进入全屏</div></div>
@@ -925,6 +998,7 @@
         </div>
         <div class="setting-group">
           <div class="setting-group-label">数据</div>
+          ${renderHistory7dCard(t.recentHistory)}
           <div class="setting-row no-divider">
             <div><div class="setting-row-title">今日成果</div><div class="setting-row-detail">清零今日番茄数、专注时长、打断与作废</div></div>
             ${
@@ -1046,6 +1120,7 @@
             <div style="display:flex;gap:6px;flex-wrap:wrap;padding:4px 0;">
               <span class="key-chip mono">pomo status</span>
               <span class="key-chip mono">pomo tasks</span>
+              <span class="key-chip mono">pomo history</span>
               <span class="key-chip mono">pomo log-today</span>
             </div>
             <div style="font-size:11px;color:var(--gray);padding:4px 0;">AI 用命令行 pomo 即可调用，说明见 docs/API.md</div>
@@ -1071,6 +1146,7 @@
         ["空格", "开始 / 暂停"],
         [`${modPrefix}R`, "重置"],
         [`${modPrefix}Shift+S`, "跳过"],
+        [`${modPrefix}N`, "新建任务"],
         ["-", "内部打断"],
         ["=", "外部打断"],
         [`${altPrefix}I`, "发送到副屏"],
@@ -1095,11 +1171,13 @@
         </div>
         <div class="setting-group">
           <div class="setting-group-label">快速添加</div>
-          <div style="font-family:var(--font-mono);font-size:12.5px;background:var(--panel-solid);border-radius:10px;padding:8px 12px;margin:4px 0;">写周报 ×2 P1 @11-25</div>
+          <div style="font-family:var(--font-mono);font-size:12.5px;background:var(--panel-solid);border-radius:10px;padding:8px 12px;margin:4px 0;">写周报 #科研 ×2 P1 @11-25 !</div>
           <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:6px;">
             <span style="display:inline-flex;align-items:center;gap:5px;font-size:11.5px;color:var(--gray);"><span class="key-chip mono" style="color:var(--ink);">×2</span>预估番茄</span>
             <span style="display:inline-flex;align-items:center;gap:5px;font-size:11.5px;color:var(--gray);"><span class="key-chip mono" style="color:var(--ink);">P0–P3</span>优先级</span>
             <span style="display:inline-flex;align-items:center;gap:5px;font-size:11.5px;color:var(--gray);"><span class="key-chip mono" style="color:var(--ink);">@明天</span>DDL</span>
+            <span style="display:inline-flex;align-items:center;gap:5px;font-size:11.5px;color:var(--gray);"><span class="key-chip mono" style="color:var(--ink);">#标签</span>分类</span>
+            <span style="display:inline-flex;align-items:center;gap:5px;font-size:11.5px;color:var(--gray);"><span class="key-chip mono" style="color:var(--ink);">!</span>重点</span>
           </div>
         </div>
         <div class="setting-group">
@@ -1178,6 +1256,14 @@
     if (act === "task-est") {
       e.stopPropagation();
       return window.pomo.adjustEstimate(el.dataset.id, Number(el.dataset.delta));
+    }
+    if (act === "task-top3") {
+      e.stopPropagation();
+      return window.pomo.toggleTop3(el.dataset.id);
+    }
+    if (act === "task-prio") {
+      e.stopPropagation();
+      return window.pomo.cyclePriority(el.dataset.id);
     }
     if (act === "task-rm") {
       e.stopPropagation();
@@ -1483,6 +1569,22 @@
       if (mod && !e.altKey && !e.shiftKey && e.code === "KeyR") {
         e.preventDefault();
         await window.pomo.reset();
+      } else if (mod && !e.altKey && !e.shiftKey && e.code === "KeyN") {
+        e.preventDefault();
+        const kind = getLayoutKind(window.innerWidth, window.innerHeight);
+        if (kind === "portrait") {
+          activePopover = "tasks";
+          renderPopover();
+          const input = popoverLayer.querySelector('[data-slot="task-add-input"]');
+          input?.focus();
+        } else if (kind === "landscape") {
+          if (activePopover) {
+            activePopover = null;
+            renderPopover();
+          }
+          const input = appEl.querySelector('[data-slot="task-add-input"]');
+          input?.focus();
+        }
       } else if (mod && e.shiftKey && !e.altKey && e.code === "KeyS") {
         e.preventDefault();
         await window.pomo.skip();

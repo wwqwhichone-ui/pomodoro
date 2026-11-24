@@ -8,14 +8,16 @@
   pomo health                       检查本机接口是否在线
   pomo status                       当前阶段、剩余时间、当前任务、今日统计
   pomo tasks                        今日待办（按 Top3 → 优先级 → DDL 排序，带序号）
-  pomo add "写周报" [-e 2] [-p P1] [-d 2026-11-25|11-25|明天] [--top3] [--note ...] [--select]
+  pomo add "写周报" [-e 2] [-p P1] [-d 2026-11-25|11-25|明天] [-g 标签] [--top3] [--note ...] [--select]
   pomo done <序号|id前缀>            标记完成
   pomo select <序号|id前缀>          设为当前任务
-  pomo edit <序号|id前缀> [-t 标题] [-e N] [-p P0-P3|none] [-d 日期|none] [--top3|--no-top3]
+  pomo edit <序号|id前缀> [-t 标题] [-e N] [-p P0-P3|none] [-d 日期|none] [-g 标签|none] [--top3|--no-top3]
   pomo rm <序号|id前缀>              删除
+  pomo clear-done                   清除所有已完成任务
   pomo start | pause | toggle | reset | skip
   pomo phase focus|short|long
   pomo interrupt internal|external [--undo]   记一次打断；--undo 撤销最近一次误记
+  pomo history [-d 7]               查看近 N 天（默认 7 天）的专注统计与任务明细
   pomo reset-today                  清零今日成果（番茄数、专注时长、打断、作废）
   pomo sync                         立即同步 Notion 任务
   pomo log-today                    立即把今日专注统计同步到 Notion 日志库
@@ -110,6 +112,40 @@ def print_status(s):
     print("今日：%d 个番茄 · 专注 %d 分钟 · 打断 %d · 作废 %d · 本组 %d/%d" % (
         d["completed"], d["focusMinutes"], d["internalInterruptions"] + d["externalInterruptions"],
         d["voided"], s["streak"], s["longBreakEvery"]))
+    tp = d.get("taskPomodoros") or {}
+    if isinstance(tp, dict) and tp:
+        items = sorted(tp.items(), key=lambda kv: (-kv[1], kv[0]))
+        print("今日明细：" + "、".join("%s (%d🍅)" % (k, v) for k, v in items))
+
+
+def print_history(h):
+    days = h.get("days") or []
+    summary = h.get("summary") or {}
+    print("近 %d 天汇总：%d 个番茄 · 专注 %d 分钟 · 活跃 %d 天 · 打断 %d · 作废 %d" % (
+        len(days),
+        summary.get("totalCompleted", 0),
+        summary.get("totalFocusMinutes", 0),
+        summary.get("activeDays", 0),
+        summary.get("totalInterruptions", 0),
+        summary.get("totalVoided", 0),
+    ))
+    for item in days:
+        c = item.get("completed", 0)
+        m = item.get("focusMinutes", 0)
+        ib = item.get("internalBreaks", 0)
+        eb = item.get("externalBreaks", 0)
+        bar = "🍅" * min(c, 12) + ("+%d" % (c - 12) if c > 12 else "")
+        if not bar:
+            bar = "—"
+        extra = []
+        if ib + eb > 0:
+            extra.append("打断 %d" % (ib + eb))
+        if item.get("voided", 0) > 0:
+            extra.append("作废 %d" % item["voided"])
+        if item.get("taskSummary"):
+            extra.append(item["taskSummary"])
+        tail = ("  | " + " · ".join(extra)) if extra else ""
+        print("  %s  %2d🍅 (%3d 分钟)  %s%s" % (item.get("day", ""), c, m, bar, tail))
 
 
 def main():
@@ -130,17 +166,20 @@ def main():
     a.add_argument("-e", "--estimate", type=int)
     a.add_argument("-p", "--priority")
     a.add_argument("-d", "--due")
+    a.add_argument("-g", "--tag")
     a.add_argument("--top3", action="store_true")
     a.add_argument("--note")
     a.add_argument("--select", action="store_true", help="添加后设为当前任务")
     for name in ("done", "select", "rm"):
         sub.add_parser(name).add_argument("task")
+    sub.add_parser("clear-done")
     e = sub.add_parser("edit")
     e.add_argument("task")
     e.add_argument("-t", "--title")
     e.add_argument("-e", "--estimate", type=int)
     e.add_argument("-p", "--priority")
     e.add_argument("-d", "--due")
+    e.add_argument("-g", "--tag")
     e.add_argument("--note")
     g = e.add_mutually_exclusive_group()
     g.add_argument("--top3", dest="top3", action="store_true", default=None)
@@ -151,6 +190,8 @@ def main():
     it = sub.add_parser("interrupt")
     it.add_argument("kind", choices=["internal", "external"])
     it.add_argument("--undo", action="store_true", help="撤销最近一次误记")
+    hi = sub.add_parser("history")
+    hi.add_argument("-d", "--days", type=int, default=7, help="查看最近 N 天（默认 7）")
     sub.add_parser("reset-today")
     args = ap.parse_args()
 
@@ -182,6 +223,8 @@ def main():
             body["priority"] = args.priority
         if args.due:
             body["due"] = args.due
+        if args.tag:
+            body["tag"] = args.tag
         if args.note:
             body["note"] = args.note
         r = call("POST", "tasks", body)
@@ -191,6 +234,10 @@ def main():
         r = call("POST", "tasks/%s/select" % args.task)
     elif args.cmd == "rm":
         r = call("DELETE", "tasks/%s" % args.task)
+    elif args.cmd == "clear-done":
+        r = call("POST", "tasks/clear-finished")
+        if not args.json:
+            return print("已清除已完成任务（剩余 %d 条待办）。" % len(r.get("tasks", [])))
     elif args.cmd == "edit":
         body = {}
         if args.title:
@@ -201,6 +248,8 @@ def main():
             body["priority"] = None if args.priority == "none" else args.priority
         if args.due:
             body["due"] = None if args.due == "none" else args.due
+        if args.tag:
+            body["tag"] = None if args.tag == "none" else args.tag
         if args.note is not None:
             body["note"] = args.note
         if args.top3 is not None:
@@ -212,6 +261,10 @@ def main():
         r = call("POST", "timer/phase", {"phase": args.phase})
     elif args.cmd == "interrupt":
         r = call("POST", "interruptions", {"kind": args.kind, "undo": args.undo})
+    elif args.cmd == "history":
+        days = max(1, min(60, int(args.days or 7)))
+        r = call("GET", "stats/history?days=%d" % days)
+        return print(json.dumps(r, ensure_ascii=False, indent=2)) if args.json else print_history(r)
     elif args.cmd == "reset-today":
         r = call("POST", "stats/reset")
     elif args.cmd == "sync":

@@ -4,17 +4,23 @@ const {
   BrowserWindow,
   Tray,
   Menu,
+  Notification,
   nativeImage,
   nativeTheme,
   ipcMain,
   screen,
   powerSaveBlocker,
+  powerMonitor,
   shell,
   clipboard,
 } = require("electron");
 const { TimerModel, PHASE_TITLES } = require("./model");
 const { NotionSync, extractID, parseCategories } = require("./notion");
 const { APIServer } = require("./api-server");
+
+if (process.platform === "win32" && typeof app.setAppUserModelId === "function") {
+  app.setAppUserModelId("local.pomodoro.app");
+}
 
 const NORMAL_SIZE = { width: 440, height: 640 };
 const MINI_SIZE = { width: 320, height: 104 };
@@ -39,6 +45,7 @@ let fullScreenTimer = null;
 let afterExitFullScreen = null;
 let savedBounds = null;
 let lastPrimaryBounds = null;
+let boundsSaveTimer = null;
 let lastTooltip = "";
 let lastMenuSignature = "";
 let shuttingDown = false;
@@ -110,7 +117,49 @@ function broadcastState() {
     win.webContents.send("pomo:state", getFullState());
   }
   updateTray();
+  syncTaskbarProgress();
   syncPowerBlocker();
+}
+
+function syncTaskbarProgress() {
+  if (!win || win.isDestroyed() || !model) return;
+  try {
+    if (model.isRunning) {
+      win.setProgressBar(Math.max(0.02, model.progress), { mode: "normal" });
+    } else if (model.hasStarted) {
+      win.setProgressBar(Math.max(0.02, model.progress), { mode: "paused" });
+    } else {
+      win.setProgressBar(-1);
+    }
+  } catch {
+    // ignore taskbar errors on unsupported platforms
+  }
+}
+
+function showPhaseNotification(info) {
+  if (!model || model.settings.desktopNotifications === false) return;
+  try {
+    if (!Notification || !Notification.isSupported()) return;
+    const isFocusDone = info?.completedPhase === "focus";
+    const title = isFocusDone
+      ? `番茄完成 · 今日第 ${model.stats.completed} 个番茄`
+      : "休息结束 · 准备专注";
+    const body = isFocusDone
+      ? `${info?.nextPhase === "longBreak" ? "长休息" : "短休息"}建议：${model.breakTip}`
+      : model.currentTask
+        ? `当前任务：${model.currentTask.title}`
+        : "新的一段专注已准备就绪";
+    const n = new Notification({
+      title,
+      body,
+      silent: true,
+      icon: path.join(__dirname, "..", "assets", process.platform === "win32" ? "icon.ico" : "icon.png"),
+    });
+    n.on("click", () => showMainWindow());
+    n.show();
+  } catch {
+    // ignore notification errors
+  }
 }
 
 function syncPowerBlocker() {
@@ -139,6 +188,11 @@ function rememberPrimaryBounds() {
   const b = win.getBounds();
   if (!isCompactSize(b)) {
     lastPrimaryBounds = b;
+    if (boundsSaveTimer) clearTimeout(boundsSaveTimer);
+    boundsSaveTimer = setTimeout(() => {
+      boundsSaveTimer = null;
+      model?.setWindowBounds(b);
+    }, 350);
   }
 }
 
@@ -358,9 +412,27 @@ function updateTray() {
 function createWindow() {
   const appearance = model.settings.appearance;
   const dark = appearance === "dark" || (appearance === "system" && nativeTheme.shouldUseDarkColors);
+
+  let initialBounds = { width: NORMAL_SIZE.width, height: NORMAL_SIZE.height };
+  if (model.windowBounds && !isCompactSize(model.windowBounds)) {
+    const targetDisplay = screen.getDisplayMatching(model.windowBounds) || screen.getPrimaryDisplay();
+    const restored = constrainBounds(
+      {
+        x: model.windowBounds.x,
+        y: model.windowBounds.y,
+        width: Math.max(260, model.windowBounds.width),
+        height: Math.max(190, model.windowBounds.height),
+      },
+      targetDisplay.workArea
+    );
+    initialBounds = restored;
+    if (targetDisplay.id === screen.getPrimaryDisplay().id) {
+      lastPrimaryBounds = restored;
+    }
+  }
+
   win = new BrowserWindow({
-    width: NORMAL_SIZE.width,
-    height: NORMAL_SIZE.height,
+    ...initialBounds,
     minWidth: 260,
     minHeight: 84,
     frame: false,
@@ -393,6 +465,13 @@ function createWindow() {
 
   win.on("focus", () => {
     win?.flashFrame(false);
+  });
+
+  win.on("close", (e) => {
+    if (!shuttingDown && model && model.settings.closeToTray && model.settings.showInTray) {
+      e.preventDefault();
+      win.hide();
+    }
   });
 
   win.on("moved", () => {
@@ -456,6 +535,15 @@ function registerIPC() {
   ipcMain.handle("pomo:task-toggle", (_e, id) => model.toggleFinished(id));
   ipcMain.handle("pomo:task-remove", (_e, id) => model.removeTask(id));
   ipcMain.handle("pomo:task-estimate", (_e, { id, delta }) => model.adjustEstimate(id, delta));
+  ipcMain.handle("pomo:task-top3", (_e, id) => model.toggleTop3(id));
+  ipcMain.handle("pomo:task-priority", (_e, id) => model.cyclePriority(id));
+  ipcMain.handle("pomo:task-rename", (_e, { id, title }) => {
+    const clean = String(title || "").trim();
+    if (!clean) return null;
+    return model.updateTask(id, (t) => {
+      t.title = clean;
+    });
+  });
   ipcMain.handle("pomo:task-clear-finished", () => model.clearFinished());
 
   ipcMain.handle("pomo:settings-update", (_e, patch) => {
@@ -545,7 +633,13 @@ function registerIPC() {
     win.setFullScreen(!isFullScreen);
   });
   ipcMain.handle("pomo:win-minimize", () => win?.minimize());
-  ipcMain.handle("pomo:win-close", () => app.quit());
+  ipcMain.handle("pomo:win-close", () => {
+    if (model && model.settings.closeToTray && model.settings.showInTray && win && !win.isDestroyed()) {
+      win.hide();
+      return;
+    }
+    app.quit();
+  });
   ipcMain.handle("pomo:open-external", (_e, url) => {
     if (typeof url === "string" && /^https?:\/\//i.test(url)) {
       return shell.openExternal(url);
@@ -575,6 +669,7 @@ app.whenReady().then(async () => {
       if (!win.isFocused()) win.flashFrame(true);
       win.webContents.send("pomo:phase-complete", info);
     }
+    showPhaseNotification(info);
     broadcastState();
   });
   notion.on("change", () => broadcastState());
@@ -582,6 +677,15 @@ app.whenReady().then(async () => {
   nativeTheme.on("updated", () => broadcastState());
   screen.on("display-added", () => handleScreenStateChange());
   screen.on("display-removed", () => handleScreenStateChange());
+  powerMonitor.on("resume", () => {
+    model?.refreshDay();
+    if (model?.isRunning) model.tick();
+    notion?.flushPendingLogs(true);
+    if (notion?.getStatus().configured) {
+      notion.sync().catch(() => {});
+    }
+    broadcastState();
+  });
 
   registerIPC();
   syncTrayEnabled();
@@ -599,6 +703,13 @@ app.on("before-quit", async (e) => {
   e.preventDefault();
   try {
     if (fullScreenTimer) clearTimeout(fullScreenTimer);
+    if (boundsSaveTimer) {
+      clearTimeout(boundsSaveTimer);
+      boundsSaveTimer = null;
+      if (lastPrimaryBounds && !isCompactSize(lastPrimaryBounds)) {
+        model?.setWindowBounds(lastPrimaryBounds);
+      }
+    }
     if (blockerId !== null && powerSaveBlocker.isStarted(blockerId)) {
       powerSaveBlocker.stop(blockerId);
       blockerId = null;

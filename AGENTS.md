@@ -22,8 +22,12 @@ Sources/Theme.swift             Theme（纸色 / 深咖）、Typo 字体、Press
 Sources/Components.swift        进度环、阶段切换、按钮、任务列表 / 行（点击展开完整名称）、优先级标签、打断记录等组件
 Sources/Layouts.swift           ContentView（选布局、主题）、横屏 / 竖屏 / 迷你三种布局、工具栏、设置（三个分页）
 Sources/SettingsControls.swift 设置用控件：CapsuleTabs、SettingRow / SettingGroup、InkStepper、InkSwitch、InkField、InkButton、KeyChip（设置里不要再用系统 Stepper / Toggle / 分段控件）
-tools/pomo                      跨平台命令行（可软链到 ~/.local/bin/pomo）
+tools/pomo                      跨平台命令行（可软链或复制到 ~/.local/bin/pomo）
+tools/pomo.cmd                  Windows 命令行批处理入口
 tools/make_icon.swift           生成 macOS 图标
+deploy/install-windows.ps1      Windows 本机一键构建、部署、配 PATH 与启动脚本
+deploy/install-macos.sh         macOS 本机一键编译、安装与启动脚本
+DEPLOYMENT.md                   双平台本机部署与运维文档
 docs/API.md                     接口与 Notion 同步说明
 windows/src/                    Windows Electron 主进程、Model/Notion/API 与渲染层
 windows/assets/                 Windows icon.ico / icon.png / tray.png
@@ -44,6 +48,7 @@ pkill -x Pomodoro                         # 结束运行中的实例（重新构
 cd windows && npm test                    # 运行单测与 API/CLI 集成测试
 cd windows && node test/smoke-win.js      # 用独立临时目录启动桌面版并冒烟测试
 cd windows && npm run dist:win            # 打包 Windows 便携 .zip 与 portable.exe
+powershell -ExecutionPolicy Bypass -File .\deploy\install-windows.ps1  # 一键构建并部署到 Windows 本机
 
 # 本机接口
 pomo health / pomo status / pomo tasks    # 通过接口操作运行中的 App
